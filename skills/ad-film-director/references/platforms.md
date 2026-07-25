@@ -1,0 +1,210 @@
+# Platforms: Generation and Delivery
+
+Load in Phase 3 (routing) and Phase 7 (delivery).
+
+Two unrelated things live here: **where footage comes from**, and **where it goes**.
+
+> **Verification notice.** Model versions, capabilities, endpoints and prices change monthly.
+> Everything in Part 1 was accurate when written (mid-2026) but **must be treated as needing
+> verification** before you rely on it — especially pricing. Never quote a price to the user
+> as certain. Part 2 (delivery specs) is far more stable.
+
+---
+
+# PART 1 — Generation platforms
+
+## The access question decides everything
+
+Before capability, ask: **can the agent call it, or must a human click?**
+
+| Access type | Meaning | Consequence |
+|---|---|---|
+| **api** | Working API, key present, credits available | Agent generates directly |
+| **ui** | Subscription is web-only, or API not included in the plan | Agent writes a packet, human generates |
+| **api-paid** | API exists but needs credits bought separately | **Warn with an estimate, ask first** |
+
+A crucial and frequently misunderstood point: **most consumer AI subscriptions do not include
+API access.** The web plan and the API are usually separate products with separate billing.
+Having a paid subscription does *not* imply programmatic access. Always check the `access`
+field in the fleet config rather than assuming.
+
+## Capability map — what to route where
+
+Match the shot's need to a platform's strength, not to whatever is cheapest.
+
+| Shot need | Look for a platform whose strength is | Notes |
+|---|---|---|
+| Hero product shot, physical realism | Physics fidelity, high resolution | Worth a manual UI step on the best platform available |
+| Product with legible label/logo | Text legibility, image-to-video | Or composite the label in post |
+| Talking presenter, lipsync | Avatar / talking-head specialism | Dedicated avatar tools beat general video models here |
+| Human motion, walking, gesture | Human-motion quality | General models still struggle with hands |
+| Fast style exploration | Cheap, fast iteration | Use drafts to choose a look, then commit |
+| Character across many shots | Reference-image conditioning | See `consistency.md` |
+| Product move landing on exact framing | First-and-last-frame interpolation | Strong control when available |
+| Clip with usable synchronised audio | Native audio generation | Rare and valuable; most models are silent |
+| Stylised, comedic, meme-register | Stylisation over realism | Realism is not the goal here |
+
+## Landscape notes (mid-2026 — verify before relying)
+
+Written as guidance about *kinds* of capability, since specific versions move fast.
+
+- **Google Veo (3.1 at time of writing)** — the standout for physical-product realism, text
+  legibility, and the only one delivering genuinely usable native audio in a single pass.
+  Per-call clip length is short (around 8s), so sequences are stitched in post. Available to
+  consumer subscribers through Flow and the Gemini app (**UI only**); the API is a separate,
+  usage-billed product.
+- **Kling (3.0 / O3 line)** — strong human motion and character consistency, with multi-shot
+  storyboarding and reference-to-video modes. Good for anything with people.
+- **Runway (Gen-4 / Gen-4.5)** — the most mature reference-image system (accepts multiple
+  reference images), longer clips, and audio added in the 4.5 line. Best choice when a brand
+  character or product must persist across many shots.
+- **Sora (2)** — cinematic quality and strong prompt adherence; multi-shot storyboard tooling.
+- **Luma Ray (Ray3)** — first-and-last-frame interpolation ("Frames") makes it excellent for
+  controlled product moves; HDR headroom is useful if you grade afterwards.
+- **Alibaba Wan (2.6)** — reference-to-video with voice, fast drafts, and earlier versions
+  have open weights if self-hosting matters.
+- **MiniMax Hailuo** — economical drafts, high-motion social content.
+- **Pika** — stylised work and multi-asset composition.
+- **ByteDance Seedance** — technically strong but **subject to access restrictions in some
+  regions following 2026 legal disputes**. Verify availability and licensing before using it
+  for commercial work.
+
+Aggregators (**fal.ai**, **Replicate**) front many of these behind one key with a uniform
+async pattern — submit, receive a request id, poll until complete. Useful when your
+subscriptions don't cover a needed capability. Verify model identifiers before use; they
+change.
+
+## Routing procedure
+
+1. Read `fleet.yaml`. Filter to platforms whose `can` covers the shot's need.
+2. Split by `access`: ✅ api-with-credits, 🖐 ui, 💰 api-paid, 🚫 nothing suitable.
+3. Rank the viable ones by `best_for` match, then by `priority`.
+4. Check remaining budget; apply rotation across accounts.
+5. **Present the options and ask** — see §3 of SKILL.md. Never skip.
+
+Route hero shots to the best available platform even if that means a manual step. Route
+drafts and volume to whatever is cheapest and automatic. That asymmetry is usually the
+correct plan.
+
+## Account rotation
+
+With several accounts on one platform, distribute round-robin rather than draining one:
+monthly credits reset per account, so an even burn maximises total monthly capacity.
+`fleet.py` tracks spend in `.fleet-state.json`. Warn when an account drops below the
+configured threshold.
+
+## Browser automation — do not
+
+Automating consumer web UIs (Flow, Grok, and similar) **violates their terms of service** and
+risks losing the accounts. Bot protections are active. There is no safe workaround, and the
+downside — losing several paid accounts — dwarfs the convenience.
+
+The correct pattern for UI-only platforms is the **generation packet**: the agent produces
+exact prompts and settings, the human generates and downloads, the agent resumes. This is
+fully legitimate and costs only the credits the user already owns.
+
+---
+
+# PART 2 — Delivery specs
+
+More stable than Part 1, but still worth a sanity check for a paid campaign.
+
+## Master file
+
+Produce one master, then export per destination:
+
+**1080×1920, 9:16, H.264, MP4, 30fps, yuv420p, faststart, AAC audio**
+
+This covers TikTok, Reels and Shorts. Add a 4:5 export for the Instagram feed and a 16:9 for
+YouTube proper.
+
+## Safe zones — the detail that ruins ads
+
+Platform UI overlays cover parts of the frame, and **each platform covers different parts.**
+Text placed under a UI element is unfixable after posting. Design for this at composition
+time — reserve the zone in the shot prompt (see the preservation clause in `consistency.md`).
+
+### Instagram Reels (1080×1920 canvas)
+
+| Edge | Reserve |
+|---|---|
+| Top | ~250px |
+| Bottom | ~250–340px (profile row, caption, CTA) |
+| Left / Right | ~60px |
+
+### TikTok (1080×1920 canvas)
+
+| Edge | Reserve |
+|---|---|
+| Top | ~150–200px |
+| Bottom | ~350px (caption, controls) |
+| **Right** | **~180px** (like / comment / share / profile column) |
+| Left | ~60px |
+
+**TikTok's right-hand column is the trap.** A caption centred for Instagram can sit directly
+under TikTok's icon stack. If one asset must serve both, keep text within the *intersection*
+of both safe areas — roughly centre-frame, above 350px from the bottom and 180px from the
+right.
+
+The `video-editor` skill applies per-platform safe zones automatically when you pass
+`--safe tiktok` or `--safe reels`.
+
+## Format specs
+
+| | Instagram Reels | Instagram feed | TikTok | YouTube Shorts |
+|---|---|---|---|---|
+| Resolution | 1080×1920 | 1080×1350 | 1080×1920 | 1080×1920 |
+| Ratio | 9:16 | 4:5 | 9:16 | 9:16 |
+| Optimal length | 15–30s | — | 9–15s | 6–15s |
+| Max length | 90s (Reels) | — | 10 min upload | 60s |
+| Codec | H.264 | H.264 | H.264 | H.264 |
+| Bitrate | 3.5–8 Mbps | 3.5–8 Mbps | 5–8 Mbps | 5–8 Mbps |
+| Frame rate | 30fps | 30fps | 30fps (23–60 accepted) | 30fps |
+| Audio | AAC, optional | AAC | AAC, sound-on culture | AAC |
+| Captions | **effectively mandatory** | recommended | recommended | recommended |
+
+4:5 (1080×1350) remains the preferred Instagram feed ratio — it occupies more vertical scroll
+space than 1:1. Keep 1:1 as a cross-platform fallback.
+
+## Loudness
+
+Target around **−14 LUFS integrated with true peak at −1.5 dBTP** for social delivery.
+Platforms normalise anyway; delivering hot only causes limiting artefacts.
+`video-editor`'s `audio_pro.py` and its EBU R128 pass handle this — don't hand-roll it.
+
+## Sound-on versus sound-off
+
+- **Meta / Instagram** — assume muted. 80–85% of viewing has no audio. Every claim, joke and
+  CTA must survive silently. Burn in captions.
+- **TikTok** — sound-on by default, full-screen and immersive. Design *for* audio, but caption
+  anyway for accessibility and for the muted minority.
+- **YouTube Shorts** — mixed. Caption.
+
+## Performance benchmarks
+
+Useful for judging whether a creative is working. Hook rate is viewers still watching at 3s.
+
+| Platform | Hook rate median | Top 10% | Best CTR length |
+|---|---|---|---|
+| Meta / Instagram | ~28% | ~45% | 15–30s |
+| TikTok | ~33% | ~55% | 9–15s |
+| YouTube | ~22% | ~38% | 6–15s |
+
+Meta hook rate under 15% means the creative is dead — replace the opening rather than tuning
+the middle. Completion rate favours shorter cuts than CTR does, so a 9s cutdown and a 20s
+version serve different objectives and are both worth having.
+
+UGC-style creative typically beats polished on hook rate and CTR; polished wins brand recall
+and higher-ticket intent. See `creative-registers.md`.
+
+## Multi-account delivery
+
+Running several accounts in parallel has two failure modes:
+
+1. **The same cut on two accounts.** Overlapping audiences read duplicates as spam. Use the
+   variant registry (`campaign.py register`) and check before assigning.
+2. **A character drifting across a campaign.** Always generate from stored canonical
+   references, never from the last video's frames. See `consistency.md`.
+
+Make variants by changing the hook first (highest leverage), then register, claim, length,
+CTA. Change one variable at a time if you want to learn which one moved the numbers.

@@ -1,0 +1,31 @@
+# Runtime state — machine-specific, never commit
+.fleet-state.json
+.campaign/
+inbox/
+generated/
+deliver/
+*.tmp.json
+.packet-needs.tmp.json
+
+# Personal fleet config — contains account counts and platform choices.
+# fleet.example.yaml IS committed; fleet.yaml is yours.
+fleet.yaml
+fleet.yml
+
+# Media
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.mp3
+*.wav
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db

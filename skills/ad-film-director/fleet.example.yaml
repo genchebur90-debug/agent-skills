@@ -1,0 +1,297 @@
+# ============================================================================
+# fleet.yaml — your personal generation fleet
+# ============================================================================
+#
+# Copy this file to `fleet.yaml` and describe what YOU actually have.
+# The skill reads it to decide where each shot can be generated, what it will
+# cost you, and what it must ask you before spending anything.
+#
+#   cp fleet.example.yaml fleet.yaml
+#   $EDITOR fleet.yaml
+#   python3 scripts/fleet.py detect
+#
+# The example below is a real, fairly large fleet. Delete what you don't have.
+# A fleet with one platform works fine.
+#
+# ---------------------------------------------------------------------------
+# THE MOST IMPORTANT FIELD IS `access`. It decides whether the agent can
+# generate for you automatically, must hand you a prompt to paste, or must
+# warn you about buying credits first.
+#
+#   access: api           You have working API access. Agent generates directly.
+#                         Requires auth_env to be set in your environment.
+#
+#   access: ui            Subscription is web-only — no API, or API not included.
+#                         Agent gives you copy-paste prompts; you generate in the
+#                         browser and drop files into inbox/. Costs credits you
+#                         already own. NO NEW SPEND.
+#
+#   access: api-paid      API exists but needs credits bought separately, on top
+#                         of your subscription. The agent will ALWAYS warn you and
+#                         quote an estimate before using it. Set `access: api`
+#                         only once you've actually bought the credits.
+#
+#   access: off           Disabled. Agent ignores it entirely.
+# ---------------------------------------------------------------------------
+
+
+# ============================================================================
+# GLOBAL PREFERENCES
+# ============================================================================
+preferences:
+  # Never buy credits without asking. Keep this true unless you want the agent
+  # to use paid APIs freely.
+  require_approval_for_paid: true
+
+  # Hard ceiling per production run, in USD. The agent stops and asks if a plan
+  # would exceed it. Set to 0 to forbid all paid generation.
+  max_spend_per_run_usd: 0
+
+  # Prefer platforms whose credits you already own, even at some quality cost.
+  prefer_included_credits: true
+
+  # Spread work across accounts instead of draining one.
+  rotate_accounts: true
+
+  # Warn when an account drops below this share of its budget.
+  low_budget_warn_pct: 15
+
+  # NEVER set this true. Automating consumer web UIs (Google Flow, Grok, etc.)
+  # violates their terms of service and risks losing your accounts. The skill
+  # refuses regardless; this flag exists only to document the decision.
+  allow_browser_automation: false
+
+
+# ============================================================================
+# PLATFORMS
+# ============================================================================
+platforms:
+
+  # --------------------------------------------------------------------------
+  # magica.ai — real REST API, and subscription credits are spent through it.
+  # This makes it the primary programmatic engine when you have it.
+  # --------------------------------------------------------------------------
+  - id: magica
+    label: "magica.ai"
+    access: api
+    priority: 1
+
+    endpoint: https://api.magica.com/api/v1
+    auth_scheme: bearer            # Authorization: Bearer <key>
+    auth_env: MAGICA_API_KEY       # single account
+    # Several accounts: number the env vars and set accounts below.
+    auth_env_pattern: MAGICA_API_KEY_{n}
+    accounts: 6
+
+    budget_per_account: 40000000
+    unit: credits
+    resets: never                  # one-off allocation, not monthly
+
+    rate_limit:
+      per_min: 60
+      per_day: 1000
+
+    can: [image, video, image-to-video, lipsync, tts, audio]
+    best_for: [bulk-drafts, iteration, image-to-video, automation]
+    weak_at: [close-up-lipsync, native-audio-video]
+
+    notes: >
+      Aggregates many third-party models behind one API. Browse the catalogue
+      before assuming a specific model is available. Keys: Settings → API Keys,
+      up to 10 per account. OpenAPI spec at /api/v1/openapi.json.
+
+  # --------------------------------------------------------------------------
+  # Google AI Pro — Veo access through Flow and the Gemini app. UI ONLY.
+  # The Veo API is a separate, separately-billed product. Your consumer
+  # subscription does not include it.
+  # --------------------------------------------------------------------------
+  - id: google-flow
+    label: "Google AI Pro (Flow / Gemini)"
+    access: ui
+    priority: 2
+
+    url: https://labs.google/flow
+    accounts: 7
+    budget_per_account: 1000
+    unit: flow-credits
+    resets: monthly
+
+    can: [video, video-with-audio, image-to-video]
+    best_for: [physical-realism, text-legibility, native-audio, hero-shots]
+    weak_at: [long-clips]
+
+    max_clip_seconds: 8
+
+    manual_workflow:
+      steps:
+        - "Open Flow, pick the account with credits left"
+        - "Paste the prompt from the generation packet"
+        - "Set aspect ratio and duration as specified"
+        - "Attach the reference image when the shot calls for image-to-video"
+        - "Generate, download the MP4"
+        - "Save as inbox/<shot-id>.mp4 using the packet's filename"
+
+    notes: >
+      Highest quality for physical-product realism and the only one delivering
+      usable native audio in one pass. Worth the manual step for hero shots.
+      Programmatic access would require a separate billable Gemini API key —
+      that is a different product from this subscription.
+
+  # --------------------------------------------------------------------------
+  # HeyGen — avatar / talking-head video. Subscription is UI; the API is open
+  # to anyone but bills separately, pay-as-you-go.
+  # --------------------------------------------------------------------------
+  - id: heygen
+    label: "HeyGen Creator"
+    access: ui                     # change to api-paid only if you buy API credits
+    priority: 3
+
+    url: https://app.heygen.com
+    accounts: 10
+    budget_per_account: 200
+    unit: premium-credits
+    resets: monthly
+
+    api:
+      endpoint: https://api.heygen.com
+      auth_scheme: header
+      auth_header: X-Api-Key
+      auth_env: HEYGEN_API_KEY
+      billing: pay-as-you-go
+      separate_purchase: true
+      est_cost_note: "~$1 per minute of standard avatar video; premium avatar tiers cost more. VERIFY CURRENT PRICING before buying."
+      concurrency: 10
+
+    can: [avatar-video, lipsync, talking-head, translation]
+    best_for: [presenter, ugc-testimonial, spokesperson, multi-language]
+    weak_at: [product-macro, cinematic-broll]
+
+    notes: >
+      The Creator subscription does NOT include API credits — they are bought
+      separately. Both paths are legitimate; the agent must show you both and
+      let you choose. UI costs credits you already have.
+
+  # --------------------------------------------------------------------------
+  # mitte.ai — multi-model creative workspace. No public API found.
+  # --------------------------------------------------------------------------
+  - id: mitte
+    label: "mitte.ai"
+    access: ui
+    priority: 4
+
+    url: https://mitte.ai
+    accounts: 10
+    budget_per_account: 20000
+    unit: credits
+    resets: monthly
+
+    can: [image, video, audio]
+    best_for: [drafts, style-exploration, variant-volume]
+
+    manual_workflow:
+      steps:
+        - "Open mitte.ai, pick the account with credits left"
+        - "Choose the model named in the packet"
+        - "Paste the prompt, set ratio and duration"
+        - "Generate, download, save as inbox/<shot-id>.mp4"
+
+    notes: >
+      Fronts many models (Veo, Kling, Sora, Flux and others) in one UI. Good for
+      cheap parallel exploration of a look before committing a hero shot.
+      No public API documented — treat as UI-only unless you find otherwise.
+
+  # --------------------------------------------------------------------------
+  # SuperGrok — Grok Imagine video via grok.com. UI only; the xAI video API
+  # is separate and separately billed.
+  # --------------------------------------------------------------------------
+  - id: supergrok
+    label: "SuperGrok"
+    access: ui
+    priority: 5
+
+    url: https://grok.com
+    accounts: 4
+    unit: subscription-quota
+    resets: monthly
+
+    can: [image, video, image-to-video]
+    best_for: [fast-iteration, stylised, humour, meme-register]
+
+    api:
+      endpoint: https://api.x.ai/v1/videos/generations
+      auth_scheme: bearer
+      auth_env: XAI_API_KEY
+      separate_purchase: true
+      est_cost_note: "Separate xAI API billing, not included in SuperGrok. VERIFY CURRENT PRICING."
+
+    notes: >
+      Useful for fast stylised or comedic drafts. The xAI API supports
+      text-to-video, image-to-video, reference-to-video and extension, but needs
+      its own key and billing — not part of the SuperGrok subscription.
+
+  # --------------------------------------------------------------------------
+  # OPTIONAL: aggregator APIs. Add only if you hold a key. Usage-billed.
+  # --------------------------------------------------------------------------
+  - id: fal
+    label: "fal.ai (aggregator)"
+    access: off                    # set to api-paid if you have a key
+    priority: 8
+
+    endpoint: https://fal.run
+    auth_scheme: key               # Authorization: Key <key>
+    auth_env: FAL_KEY
+    billing: usage
+    separate_purchase: true
+    est_cost_note: "Per-generation billing, varies widely by model. VERIFY CURRENT PRICING."
+
+    can: [video, image, image-to-video, reference-to-video]
+    best_for: [model-variety, reference-consistency, automation]
+
+    notes: >
+      Single key fronting many video models, with a uniform async pattern:
+      POST to submit, receive a request id, poll until complete. Handy when you
+      need a model your subscriptions don't cover. Verify model slugs before
+      use — they change.
+
+
+# ============================================================================
+# DESTINATIONS — where finished ads go. Drives export formats and the
+# variant registry that stops the same cut appearing on two accounts.
+# ============================================================================
+destinations:
+  - id: ig_main
+    platform: instagram
+    handle: "@your_main"
+    formats: [reels, feed_4x5]
+    audience: "primary brand audience"
+
+  - id: ig_second
+    platform: instagram
+    handle: "@your_second"
+    formats: [reels]
+    audience: "secondary niche"
+
+  - id: ig_third
+    platform: instagram
+    handle: "@your_third"
+    formats: [reels]
+    audience: "test / experimental"
+
+  - id: tiktok_main
+    platform: tiktok
+    handle: "@your_tiktok"
+    formats: [tiktok]
+    audience: "younger, sound-on"
+
+
+# ============================================================================
+# BRAND — optional, but it makes every ad more consistent.
+# ============================================================================
+brand:
+  name: ""
+  colors: []                       # e.g. ["#0A2540", "#F5C518"]
+  fonts: []
+  logo: ""                         # path to a transparent PNG
+  tone: ""                         # e.g. "warm, plain-spoken, never salesy"
+  claims_to_avoid: []              # regulated or unprovable claims
+  recurring_characters: []         # names; refs live in the campaign registry
