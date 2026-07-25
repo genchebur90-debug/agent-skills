@@ -189,20 +189,18 @@ chmod +x "$SRC"/scripts/*.py 2>/dev/null || true
 # --- next steps ------------------------------------------------------------
 printf '\n%sNext steps%s\n\n' "$B" "$N"
 
-if [ ! -f "$SRC/fleet.yaml" ]; then
-  printf '%s1.%s Describe your generation platforms:\n' "$B" "$N"
-  dim "cp $SRC/fleet.example.yaml $SRC/fleet.yaml"
-  dim "\$EDITOR $SRC/fleet.yaml"
-  printf '\n'
-fi
-
-printf '%s2.%s Verify the install:\n' "$B" "$N"
-dim "$SRC/install.sh --check"
+printf '%s1.%s Restart your agent host so it picks up the new skill.\n' "$B" "$N"
 printf '\n'
-printf '%s3.%s Restart your agent host so it picks up the new skill.\n' "$B" "$N"
+printf '%s2.%s Ask your agent to set up your fleet — just say:\n' "$B" "$N"
+dim '"set up my ad fleet"'
+printf '    It will ask which AI tools you have and write the config for you.\n'
+printf '    %sNo need to edit YAML by hand.%s\n' "$D" "$N"
 printf '\n'
-printf '%s4.%s Then just ask for an ad:\n' "$B" "$N"
-dim '"Make me three Reels ads for this shampoo" (attach a product photo)'
+printf '%s3.%s Then ask for an ad:\n' "$B" "$N"
+dim '"make me three Reels ads for this shampoo" (attach a product photo)'
+printf '\n'
+printf '%sYou can skip step 2%s — the skill can direct an ad with no config at all,\n' "$D" "$N"
+printf '%sand set the fleet up whenever you are ready to generate.%s\n' "$D" "$N"
 printf '\n'
 
 if command -v ffmpeg >/dev/null 2>&1; then :; else

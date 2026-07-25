@@ -69,29 +69,106 @@ Written as guidance about *kinds* of capability, since specific versions move fa
   regions following 2026 legal disputes**. Verify availability and licensing before using it
   for commercial work.
 
-Aggregators (**fal.ai**, **Replicate**) front many of these behind one key with a uniform
-async pattern — submit, receive a request id, poll until complete. Useful when your
-subscriptions don't cover a needed capability. Verify model identifiers before use; they
-change.
+Aggregators (**fal.ai**, **Replicate**, **magica.ai**) front many of these behind one key
+with a uniform async pattern — submit, receive a request id, poll until complete. Useful
+when your subscriptions don't cover a needed capability. Verify model identifiers before
+use; they change.
+
+### magica.ai API shape (verified 2026-07-26)
+
+Worth documenting exactly, because it's one of the few aggregators whose *subscription*
+credits are spent through the API rather than requiring separate purchase.
+
+```bash
+# Run a model — note: modelId in the PATH, parameters nested under `input`
+curl -X POST https://api.magica.com/api/v1/nodes/{modelId}/run \
+  -H "Authorization: Bearer $MAGICA_API_KEY_1" \
+  -H "Content-Type: application/json" \
+  -d '{"subModelId":"...","input":{"prompt":"..."}}'
+# → {"runId": "..."}
+
+curl https://api.magica.com/api/v1/nodes/runs/{runId} \
+  -H "Authorization: Bearer $MAGICA_API_KEY_1"
+```
+
+| Need | Endpoint |
+|---|---|
+| Discover model ids | `GET /v1/models`, `GET /v1/models/search?q=video` |
+| Input fields for a model | `GET /v1/models/{modelId}/schema` — **read before running** |
+| Price of a model | `GET /v1/models/{modelId}/pricing` |
+| **Exact pre-run cost** | `POST /v1/nodes/estimate-credits` with `{nodes:[{type,data,subModelId?}]}` |
+| **Live credit balance** | `GET /v1/credits/balance` → `{availableBalance, formatted}` |
+| Generated assets | `GET /v1/media-library` |
+
+Keys are prefixed `gx_`, created at Settings → API Keys → Manage → Create Key, and shown
+**only once**. Up to 10 per account. Default limits 60 requests/min and 1000/day per key,
+configurable upward. `429` responses carry `Retry-After`.
+
+The autonomous agent surface (Tasks) is **not** exposed via API — only Flow (workflows) and
+Nodes (direct model execution). Nodes is what this skill uses.
+
+### Alternative: MCP instead of scripts
+
+magica also runs an MCP server at `https://api.magica.com/api/mcp` (23 tools), officially
+supporting Claude Code, Claude Desktop, Cursor and Codex. Connecting it lets the host call
+models directly without `generate.py`.
+
+```bash
+claude mcp add --transport http magica https://api.magica.com/api/mcp \
+  --header "Authorization: Bearer $MAGICA_API_KEY_1"
+```
+
+Trade-off worth explaining to the user: MCP is less setup and needs no scripts, but it
+binds to **one key at a time**, so multi-account rotation and the credit ledger are lost.
+Use MCP for exploration; use `generate.py` when running a fleet of accounts.
 
 ## Routing procedure
 
 1. Read `fleet.yaml`. Filter to platforms whose `can` covers the shot's need.
 2. Split by `access`: ✅ api-with-credits, 🖐 ui, 💰 api-paid, 🚫 nothing suitable.
 3. Rank the viable ones by `best_for` match, then by `priority`.
-4. Check remaining budget; apply rotation across accounts.
+4. Check remaining budget; apply account selection.
 5. **Present the options and ask** — see §3 of SKILL.md. Never skip.
 
-Route hero shots to the best available platform even if that means a manual step. Route
-drafts and volume to whatever is cheapest and automatic. That asymmetry is usually the
-correct plan.
+**A subtlety worth internalising: `api` and `ui` cost the user the same — nothing new.**
+One is convenient, the other needs a human click, but both spend credits already owned.
+So convenience must never outrank quality: if a UI-only platform is better at this
+specific shot, route there and accept the manual step. Only `api-paid` deserves a
+penalty, because it means new money. `fleet.py plan` ranks this way already.
 
-## Account rotation
+In practice that gives an asymmetry worth naming: **hero shots go to the best platform
+available even when manual; drafts and volume go to whatever is automatic.** A single
+manual step for the one shot that does the persuading is a good trade.
 
-With several accounts on one platform, distribute round-robin rather than draining one:
-monthly credits reset per account, so an even burn maximises total monthly capacity.
-`fleet.py` tracks spend in `.fleet-state.json`. Warn when an account drops below the
-configured threshold.
+## Account selection
+
+Two strategies, set by `prefer_fullest_account` in the fleet config:
+
+- **Fullest first (default)** — pick the account with the most budget left. Right when
+  accounts hold one-off allocations, because it keeps every account usable instead of
+  exhausting them one at a time.
+- **Round-robin** — plain rotation. Fine when budgets reset monthly and are unknown.
+
+Either way, spread the work. `fleet.py` tracks spend in `.fleet-state.json` and warns when
+an account drops below the configured threshold.
+
+With per-account API keys, name them by pattern — `auth_env_pattern: PLATFORM_KEY_{n}` —
+and the selected account resolves to its own key automatically. `fleet.py keys` reports
+which are present without ever printing a value.
+
+## Live cost and balance
+
+Some platforms expose their real numbers, which turns the Routing Gate from an estimate
+into a fact. Where available, use them:
+
+- **Balance before quoting** — never tell the user "you have credits" without checking.
+- **Exact pre-run cost** — if the platform can price a job before running it, quote that
+  figure rather than a rule of thumb.
+
+`generate.py` does this automatically in its dry run (the `live` block in its output) and
+`generate.py --balances <platform>` reports every account on a platform at once. When a
+platform has no such endpoint, fall back to the `est_cost_note` in the config and say
+plainly that it is an estimate needing verification.
 
 ## Browser automation — do not
 

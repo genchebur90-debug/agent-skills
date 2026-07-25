@@ -60,15 +60,25 @@ cd agent-skills/skills/ad-film-director
 ```
 
 That symlinks the skill into every host's directory, so `git pull` updates all of them at
-once. Then describe your platforms:
+once. Restart your agent host, then just say:
 
-```bash
-cp fleet.example.yaml fleet.yaml
-$EDITOR fleet.yaml
-./install.sh --check
+```
+set up my ad fleet
 ```
 
-Restart your agent host, and ask for an ad.
+The agent asks which AI tools you already pay for and whether you use them in a browser or
+with API keys, then writes the config for you. **You never have to edit YAML** — though you
+can (`fleet.example.yaml` is a documented template) if you'd rather.
+
+Then ask for an ad:
+
+```
+make me three Reels ads for this shampoo — here's a product photo
+```
+
+You can skip the setup entirely at first: the skill can direct an ad, write the script and
+author the shot prompts with no configuration at all. The fleet only decides *where the
+footage comes from*.
 
 <details>
 <summary>Other install options</summary>
@@ -138,17 +148,34 @@ ratio, duration, reference image to attach, and the filename to save. Generate, 
 All optional; the skill works without running any of them.
 
 ```bash
+python3 scripts/fleet.py setup                   # interview to build a config
 python3 scripts/fleet.py detect                  # mode + usable platforms
+python3 scripts/fleet.py keys                    # which keys are set (values never shown)
 python3 scripts/fleet.py plan --needs plan.json  # routing options, grouped by cost
 python3 scripts/fleet.py budget                  # credits left per account
 
 python3 scripts/packet.py --plan plan.json --out packet.md
 python3 scripts/generate.py --plan plan.json     # dry run; --confirm to actually generate
+python3 scripts/generate.py --balances magica    # live balance for every account
 
 python3 scripts/campaign.py init --name summer-launch
 python3 scripts/campaign.py add-character --name mascot --refs a.png b.png c.png
 python3 scripts/campaign.py next --account ig_main
 ```
+
+### Several accounts on one platform
+
+If you hold multiple accounts on the same service, name their keys by pattern:
+
+```yaml
+auth_env_pattern: MAGICA_API_KEY_{n}
+accounts: 6
+```
+
+Then export one key per account. The skill picks whichever account has the most credits
+left — so all of them stay usable instead of one being drained — and resolves that
+account's key automatically. `fleet.py keys` tells you which are set without ever printing
+a value.
 
 ---
 

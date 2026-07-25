@@ -414,15 +414,61 @@ class Fleet:
             return "TEXT"
         return "AUTONOMOUS" if can_api else "HYBRID"
 
+    @property
+    def prefer_fullest(self) -> bool:
+        return bool(self.prefs.get("prefer_fullest_account", True))
+
     def next_account(self, p: Platform, st: dict) -> int:
+        """
+        Pick which account to use next.
+
+        Two strategies, in order of preference:
+          1. Fullest first — pick the account with the most budget left. Keeps
+             every account usable instead of exhausting them one at a time, and
+             is what you want when accounts hold one-off allocations.
+          2. Round-robin — plain rotation when budgets are unknown or the user
+             turned fullest-first off.
+        """
         if p.accounts <= 1:
             return 1
+
+        if self.prefer_fullest and p.budget_per_account not in (None, ""):
+            best, best_rem = 1, None
+            for n in range(1, p.accounts + 1):
+                rem = p.remaining(st, n)
+                if rem is None:
+                    continue
+                if best_rem is None or rem > best_rem:
+                    best, best_rem = n, rem
+            if best_rem is not None and best_rem > 0:
+                return best
+            # Every account is exhausted — fall through to rotation so the
+            # caller still gets a concrete account to report on.
+
         if not self.rotate:
             return 1
         cur = int(st.get("rotation", {}).get(p.id, 0))
         nxt = (cur % p.accounts) + 1
         st.setdefault("rotation", {})[p.id] = nxt
         return nxt
+
+    def keys_status(self, p: Platform) -> dict:
+        """Which of a platform's per-account keys are actually present."""
+        if not p.auth_env_pattern:
+            name = p.auth_env
+            return {
+                "pattern": None,
+                "present": [1] if name and os.environ.get(name) else [],
+                "missing": [] if (name and os.environ.get(name)) else [1],
+                "env_names": {1: name} if name else {},
+            }
+        present, missing, names = [], [], {}
+        for n in range(1, p.accounts + 1):
+            var = p.auth_env_pattern.replace("{n}", str(n))
+            names[n] = var
+            (present if os.environ.get(var) else missing).append(n)
+        return {"pattern": p.auth_env_pattern, "present": present,
+                "missing": missing, "env_names": names}
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +546,142 @@ def cmd_detect(fleet: Fleet, args) -> dict:
     }
 
 
+def cmd_keys(fleet: Fleet, args) -> dict:
+    """Report which API keys are present, per account. No secrets are printed."""
+    out = []
+    for p in fleet.platforms:
+        if p.access == ACCESS_OFF:
+            continue
+        if not (p.auth_env or p.auth_env_pattern):
+            continue
+        ks = fleet.keys_status(p)
+        row: dict = {
+            "platform": p.id,
+            "label": p.label,
+            "declared_access": p.access,
+            "accounts": p.accounts,
+            "keys_present": len(ks["present"]),
+            "keys_missing": len(ks["missing"]),
+        }
+        if ks["missing"]:
+            row["missing_env_vars"] = [ks["env_names"][n] for n in ks["missing"]]
+        if p.access == ACCESS_API and not ks["present"]:
+            row["consequence"] = (
+                "Declared as api but no key found, so it is treated as UI-only. "
+                "Generation for this platform will be manual until a key is set."
+            )
+        elif p.access == ACCESS_API and ks["missing"]:
+            row["consequence"] = (
+                f"{len(ks['present'])} of {p.accounts} accounts usable. "
+                "Rotation will only use the accounts that have keys."
+            )
+        out.append(row)
+
+    ready = [r for r in out if r["keys_present"] > 0]
+    return {
+        "mode": fleet.mode(),
+        "platforms": out,
+        "note": "Only presence is checked — key values are never printed. "
+                "Run `generate.py --balances <platform>` to verify a key works.",
+        "summary": (f"{len(ready)} platform(s) have at least one working key."
+                    if ready else
+                    "No API keys found. The skill will run in HYBRID mode: it "
+                    "produces copy-paste prompt packets and you generate manually."),
+    }
+
+
+def cmd_setup(fleet: Fleet, args) -> dict:
+    """
+    Emit the interview an agent should run to build a fleet.yaml for a new user,
+    so nobody has to read YAML docs to get started.
+
+    This prints questions and a schema — it does NOT write the config. The agent
+    asks these in plain language, then writes fleet.yaml on the user's behalf.
+    """
+    cfg_exists = fleet.path is not None and not fleet.is_example
+    return {
+        "config_exists": cfg_exists,
+        "config_path": str(fleet.path) if fleet.path else None,
+        "instruction": (
+            "Do NOT ask the user to edit YAML. Ask these questions "
+            "conversationally, one small batch at a time, then write fleet.yaml "
+            "for them and confirm what you wrote. Skip anything they've already "
+            "told you. A fleet with one platform is perfectly valid."
+        ),
+        "interview": [
+            {
+                "ask": "Which AI tools do you already pay for, or have access to, "
+                       "that can make images or video?",
+                "why": "Determines the whole fleet. Accept brand names in any "
+                       "form; map them yourself.",
+                "follow_up": "For each one: how many separate accounts do you "
+                             "have, and roughly what plan?",
+            },
+            {
+                "ask": "For each tool — do you use it in a web browser, or do you "
+                       "have an API key for it?",
+                "why": "This is the single most important field. Browser-only "
+                       "means the agent writes prompts and the user generates. "
+                       "An API key means the agent can generate directly.",
+                "map_to": {
+                    "browser only": "access: ui",
+                    "has an API key": "access: api",
+                    "API exists but costs extra": "access: api-paid",
+                },
+                "note": "Most consumer subscriptions do NOT include API access — "
+                        "the web plan and the API are usually separate products. "
+                        "If unsure, set `ui`; the skill still works fully.",
+            },
+            {
+                "ask": "Are you willing to buy extra credits anywhere, or should "
+                       "I only ever use what you already have?",
+                "why": "Sets require_approval_for_paid and max_spend_per_run_usd. "
+                       "Default to only-what-you-have (max_spend 0).",
+            },
+            {
+                "ask": "Where do the finished videos go? Which accounts, on which "
+                       "platforms?",
+                "why": "Fills `destinations`, which drives export formats and the "
+                       "variant registry that stops the same cut hitting two "
+                       "accounts.",
+            },
+            {
+                "ask": "Anything brand-specific — colours, a logo file, tone of "
+                       "voice, claims you must avoid?",
+                "why": "Optional, but makes every ad more consistent.",
+                "optional": True,
+            },
+        ],
+        "then": [
+            "Write fleet.yaml next to the skill (copy the structure from "
+            "fleet.example.yaml, keeping only what applies).",
+            "Run `fleet.py detect` and show the user the resulting mode.",
+            "If any platform was set to `api`, run `fleet.py keys` and tell them "
+            "exactly which environment variables to set.",
+            "Never ask the user to paste an API key into the chat. Keys belong in "
+            "their shell environment.",
+        ],
+        "schema_hint": {
+            "platform_fields": {
+                "id": "short slug, e.g. magica",
+                "label": "human name",
+                "access": "api | ui | api-paid | off",
+                "accounts": "integer",
+                "budget_per_account": "number, optional",
+                "unit": "credits | flow-credits | etc.",
+                "resets": "monthly | never",
+                "can": "[image, video, image-to-video, avatar-video, lipsync, tts]",
+                "best_for": "free-form strengths used for routing",
+                "weak_at": "free-form weaknesses; lowers routing score",
+                "auth_env": "single env var name",
+                "auth_env_pattern": "e.g. MAGICA_API_KEY_{n} for several accounts",
+                "endpoint": "API base URL when access is api",
+                "url": "web UI URL when access is ui",
+            },
+        },
+    }
+
+
 def cmd_budget(fleet: Fleet, args) -> dict:
     st = load_state()
     out = []
@@ -572,13 +754,24 @@ def _options_for(fleet: Fleet, need: str, best_for: list[str], st: dict) -> list
             o["max_clip_seconds"] = p.max_clip_seconds
         opts.append(o)
 
-    # Best first: free-and-automatic, then strength, then priority.
-    rank = {ACCESS_API: 0, ACCESS_UI: 1, ACCESS_API_PAID: 2}
+    # Ranking, in order:
+    #   1. Exhausted accounts last.
+    #   2. Cost to the user. Crucially, `api` and `ui` rank EQUALLY — both spend
+    #      only credits already owned. Convenience is not worth a worse shot,
+    #      so a UI platform that is better at this job should win. Only
+    #      `api-paid` is penalised, because it means new money.
+    #   3. Fitness for this specific shot (best_for / weak_at).
+    #   4. Declared priority as the tiebreak.
+    #   5. Automatic over manual, but only between otherwise equal options.
+    prefer_owned = fleet.prefs.get("prefer_included_credits", True)
+    cost_rank = {ACCESS_API: 0, ACCESS_UI: 0, ACCESS_API_PAID: 1}
+    convenience = {ACCESS_API: 0, ACCESS_UI: 1, ACCESS_API_PAID: 2}
     opts.sort(key=lambda o: (
         bool(o.get("exhausted")),
-        rank.get(o["access"], 3) if fleet.prefs.get("prefer_included_credits", True) else 0,
+        cost_rank.get(o["access"], 2) if prefer_owned else 0,
         -o["score"],
         o["priority"],
+        convenience.get(o["access"], 3),
     ))
     return opts
 
@@ -721,6 +914,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("detect", help="operating mode and usable platforms")
+    sub.add_parser("setup", help="interview to build a fleet.yaml for a new user")
+    sub.add_parser("keys", help="which API keys are present (values never shown)")
     sub.add_parser("budget", help="remaining credits per account")
 
     sp = sub.add_parser("plan", help="routing options per shot")
@@ -743,16 +938,20 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     fleet = Fleet()
-    if fleet.path is None:
+    # `setup` exists precisely for the case where there is no config yet.
+    if fleet.path is None and args.cmd != "setup":
         print(json.dumps({
             "error": "no fleet config found",
-            "hint": "Copy fleet.example.yaml to fleet.yaml in the skill root.",
+            "hint": "Run `fleet.py setup` — it returns the questions to ask the "
+                    "user, then write fleet.yaml on their behalf. Do not ask them "
+                    "to edit YAML by hand.",
         }, indent=2))
         return 1
 
     handlers = {
-        "detect": cmd_detect, "budget": cmd_budget, "plan": cmd_plan,
-        "pick": cmd_pick, "spend": cmd_spend, "accounts": cmd_accounts,
+        "detect": cmd_detect, "setup": cmd_setup, "keys": cmd_keys,
+        "budget": cmd_budget, "plan": cmd_plan, "pick": cmd_pick,
+        "spend": cmd_spend, "accounts": cmd_accounts,
     }
     result = handlers[args.cmd](fleet, args)
     print(json.dumps(result, indent=2, ensure_ascii=False))

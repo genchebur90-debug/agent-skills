@@ -58,6 +58,22 @@ python3 scripts/fleet.py detect        # prints mode + available platforms
 
 If `scripts/fleet.py` is unreachable and you cannot run commands, you are in **TEXT** mode.
 
+### Is this their first time?
+
+If `fleet.py detect` reports `using_example_config: true`, this user has never configured
+the skill. **Don't hand them documentation.** Say something like:
+
+> Before I make anything I need to know what you can generate with. Two questions and
+> we're set — which AI tools do you already pay for, and do you use them in a browser or
+> with API keys?
+
+Then follow §4: run the interview, write `fleet.yaml` for them, confirm what you wrote.
+It takes one exchange and turns a generic skill into theirs.
+
+You can still direct an ad without any of this — creative work needs no config at all. The
+fleet only decides *where footage comes from*. If they'd rather just see what you can do,
+work in TEXT mode and set the fleet up later.
+
 ### What each mode means
 
 **AUTONOMOUS** — You run the full loop: author prompts, call the generation API, assemble,
@@ -290,29 +306,73 @@ the approximate credit draw so it's never a surprise.
 
 ## 4. Working with the fleet
 
-Every user's set of platforms is different. Ask the user to copy `fleet.example.yaml` to
-`fleet.yaml` and describe what they actually have: platforms, accounts, plans, budgets,
-and whether each has API access or is UI-only.
+Every user's set of platforms is different, so the skill reads a `fleet.yaml` describing
+what *this* user actually has.
+
+### First run: set it up FOR them, by asking
+
+**Never tell the user to go read a YAML file.** Most people asking for an ad have no
+interest in config schemas, and sending them to edit one is how a skill gets abandoned.
+
+If `fleet.yaml` doesn't exist (`fleet.py detect` reports `using_example_config: true`),
+run the interview:
+
+```bash
+python3 scripts/fleet.py setup     # returns the questions to ask, not a config
+```
+
+Ask those questions in plain language, in small batches, then **write `fleet.yaml`
+yourself** and tell them what you wrote. The whole exchange should feel like:
+
+> Which AI tools do you already pay for that can make images or video?
+> — *I've got Google AI Pro, a few HeyGen accounts, and 6 magica accounts.*
+>
+> Good. For each: how many accounts, and do you use them in a browser or do you have an
+> API key?
+> — *7 Google, 10 HeyGen, 6 magica. All in the browser, I don't know about API keys.*
+>
+> That's fine — I'll set them all up as browser-based, which means I write you exact
+> prompts and you generate. One exception worth knowing: magica does include API access
+> with your subscription, so I could generate there automatically if you get a key. Want
+> me to explain how, or leave it manual for now?
+
+Note what happened there: no jargon, sensible defaults, and the *one* upgrade worth
+mentioning was surfaced without being pushed. Do that.
+
+Never ask the user to paste an API key into the chat. Keys belong in their shell
+environment; you only ever check whether they're present.
+
+### Day-to-day commands
 
 ```bash
 python3 scripts/fleet.py detect                    # mode + what's usable
+python3 scripts/fleet.py keys                      # which keys are set (values never shown)
 python3 scripts/fleet.py plan --needs plan.json    # routing options per shot
-python3 scripts/fleet.py budget                    # remaining credits per account
-python3 scripts/fleet.py pick --need video --best-for physics
+python3 scripts/fleet.py budget                    # credits left per account
+python3 scripts/fleet.py pick --need video --best-for physical-realism
+python3 scripts/generate.py --balances magica      # live balance, every account
 ```
 
-Two things the fleet layer handles that matter at scale:
+### What the fleet layer gets right
 
-**Account rotation.** With several accounts on one platform, spread work round-robin rather
-than draining one. `fleet.py` tracks spend in `.fleet-state.json`.
+**Convenience never outranks quality.** `api` and `ui` cost the user the same — nothing
+new. So a UI-only platform that's *better at this shot* wins, manual step and all. Only
+`api-paid` is penalised, because it means new money. In practice: hero shots go to the best
+platform even when manual; drafts and volume go to whatever is automatic.
 
-**Honest capability matching.** A platform's `can` and `best_for` fields decide whether it's
-even a candidate. Don't route a close-up talking head to a model that's bad at faces just
-because it's free.
+**Several accounts on one platform are used intelligently.** With `prefer_fullest_account`
+on (the default), the account with the most credits left is chosen — so all of them stay
+usable instead of one being drained. Per-account keys resolve automatically from
+`auth_env_pattern`. Spend is tracked in `.fleet-state.json`.
 
-`references/platforms.md` has per-platform capabilities, access paths, and current model
-notes. **Treat version numbers and endpoints there as needing verification** — this field
-moves monthly.
+**Real numbers where they exist.** Some platforms expose a live balance and an exact
+pre-run cost. `generate.py`'s dry run surfaces those in a `live` block — quote *those*
+figures at the Routing Gate, not a rule of thumb. Where a platform has no such endpoint,
+fall back to `est_cost_note` and say plainly that it's an estimate needing verification.
+
+`references/platforms.md` has per-platform capabilities, access paths, exact endpoint
+shapes, and current model notes. **Treat version numbers and prices there as needing
+verification** — this field moves monthly.
 
 ---
 

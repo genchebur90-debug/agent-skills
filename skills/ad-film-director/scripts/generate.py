@@ -172,21 +172,25 @@ class Backend:
 
 class MagicaBackend(Backend):
     """
-    magica.ai — Bearer auth, node/model execution with run polling.
+    magica.ai — Bearer auth (gx_ keys), direct model execution via Nodes.
 
-    Endpoint shapes vary by account and change over time, so this probes a few
-    plausible paths rather than hard-coding one. If none respond, it reports the
-    failure honestly instead of pretending.
+    Verified against magica.com/docs 2026-07-26:
+        POST /api/v1/nodes/{modelId}/run   body: {subModelId?, input:{...}}
+        GET  /api/v1/nodes/runs/{runId}
+        GET  /api/v1/credits/balance
+        POST /api/v1/nodes/estimate-credits
+        GET  /api/v1/models/{modelId}/schema
+
+    Note the shape: modelId goes in the PATH, and model parameters go inside a
+    nested `input` object — not at the body root.
     """
-
-    SUBMIT_PATHS = ("/nodes/run", "/runs", "/models/run", "/generate")
-    POLL_PATHS = ("/runs/{id}", "/nodes/runs/{id}", "/generate/{id}")
 
     def auth_headers(self) -> dict:
         key = self.key()
         return {"Authorization": f"Bearer {key}"} if key else {}
 
     def key(self) -> str | None:
+        """Resolve this account's key. Numbered pattern wins over the single var."""
         pat = self.plat.get("auth_env_pattern") or ""
         if pat:
             v = os.environ.get(pat.replace("{n}", str(self.account)))
@@ -195,51 +199,115 @@ class MagicaBackend(Backend):
         single = self.plat.get("auth_env") or "MAGICA_API_KEY"
         return os.environ.get(single)
 
-    def submit(self, shot: dict) -> tuple[bool, Any]:
-        body = {
-            "prompt": shot.get("prompt", ""),
-            "duration": shot.get("seconds", 5),
-            "aspect_ratio": shot.get("aspect", "9:16"),
-        }
-        if shot.get("model"):
-            body["model"] = shot["model"]
-        if shot.get("negative"):
-            body["negative_prompt"] = shot["negative"]
-        if shot.get("reference"):
-            body["image_url"] = shot["reference"]
-        if shot.get("seed") is not None:
-            body["seed"] = shot["seed"]
+    # -- cost and balance, used by the Routing Gate --------------------------
 
-        last = None
-        for path in self.SUBMIT_PATHS:
-            code, payload = http(self.endpoint + path, method="POST",
-                                 headers=self.auth_headers(), body=body)
-            if code in (200, 201, 202):
-                rid = _dig(payload, ("request_id", "id", "run_id", "requestId"))
-                return True, {"id": rid, "path": path, "payload": payload}
-            if code in (401, 403):
-                return False, f"auth rejected ({code}) — check the API key for account {self.account}"
-            last = f"{path} -> {code}: {str(payload)[:200]}"
-        return False, f"no submit endpoint responded. Last: {last}"
+    def balance(self) -> dict | None:
+        """Live credit balance for this account. None if unreachable."""
+        code, payload = http(f"{self.endpoint}/credits/balance",
+                             headers=self.auth_headers(), timeout=30)
+        if code == 200 and isinstance(payload, dict):
+            return {
+                "available": payload.get("availableBalance"),
+                "formatted": payload.get("formatted"),
+                "subscription": payload.get("hasActiveSubscription"),
+            }
+        return None
+
+    def estimate(self, shots: list[dict]) -> dict | None:
+        """
+        Exact pre-run cost in microcredits. Per magica's docs this mirrors
+        run-time charging exactly and has no side effects.
+        """
+        nodes = []
+        for s in shots:
+            model = s.get("model")
+            if not model:
+                continue
+            node: dict = {"type": model, "data": self._input_for(s)}
+            if s.get("sub_model"):
+                node["subModelId"] = s["sub_model"]
+            nodes.append(node)
+        if not nodes:
+            return None
+        code, payload = http(f"{self.endpoint}/nodes/estimate-credits",
+                             method="POST", headers=self.auth_headers(),
+                             body={"nodes": nodes[:100]}, timeout=60)
+        if code == 200 and isinstance(payload, dict):
+            return payload
+        return None
+
+    # -- generation ---------------------------------------------------------
+
+    @staticmethod
+    def _input_for(shot: dict) -> dict:
+        """Build the nested `input` object magica expects."""
+        inp: dict = {"prompt": shot.get("prompt", "")}
+        if shot.get("seconds"):
+            inp["duration"] = shot["seconds"]
+        if shot.get("aspect"):
+            inp["aspect_ratio"] = shot["aspect"]
+        if shot.get("negative"):
+            inp["negative_prompt"] = shot["negative"]
+        if shot.get("reference"):
+            inp["image_url"] = shot["reference"]
+        if shot.get("seed") is not None:
+            inp["seed"] = shot["seed"]
+        if shot.get("resolution"):
+            inp["resolution"] = shot["resolution"]
+        # Pass through anything the caller set explicitly for this model.
+        extra = shot.get("input")
+        if isinstance(extra, dict):
+            inp.update(extra)
+        return inp
+
+    def submit(self, shot: dict) -> tuple[bool, Any]:
+        model = shot.get("model")
+        if not model:
+            return False, (
+                "magica needs a model id in the shot, e.g. \"model\": \"veo_3_1\". "
+                "Discover ids with: curl -H \"Authorization: Bearer $MAGICA_API_KEY_1\" "
+                "https://api.magica.com/api/v1/models/search?q=video"
+            )
+        body: dict = {"input": self._input_for(shot)}
+        if shot.get("sub_model"):
+            body["subModelId"] = shot["sub_model"]
+
+        code, payload = http(f"{self.endpoint}/nodes/{model}/run",
+                             method="POST", headers=self.auth_headers(), body=body)
+        if code in (200, 201, 202):
+            rid = _dig(payload, ("runId", "run_id", "id"))
+            if rid:
+                return True, {"id": rid}
+            url = find_video_url(payload)
+            return (True, {"inline": url}) if url else (
+                False, f"no runId in response: {str(payload)[:200]}")
+        if code in (401, 403):
+            return False, (f"auth rejected ({code}) for account {self.account} — "
+                           "key missing, revoked or expired")
+        if code == 429:
+            return False, "rate limited (429) — wait and retry, or use another account"
+        if code == 404:
+            return False, (f"model {model!r} not found. Check the id with "
+                           "GET /v1/models/search")
+        return False, f"{code}: {str(payload)[:250]}"
 
     def poll(self, handle: Any) -> tuple[str, Any]:
+        if handle.get("inline"):
+            return "done", handle["inline"]
         rid = handle.get("id")
         if not rid:
-            # Some APIs return the result inline on submit.
-            url = find_video_url(handle.get("payload"))
-            return ("done", url) if url else ("error", "no request id and no inline result")
-        for path in self.POLL_PATHS:
-            code, payload = http(self.endpoint + path.format(id=rid),
-                                 headers=self.auth_headers())
-            if code == 200:
-                status = find_status(payload)
-                url = find_video_url(payload)
-                if url:
-                    return "done", url
-                if status in ("failed", "error", "cancelled", "canceled"):
-                    return "error", str(_dig(payload, ("error", "message")) or payload)[:300]
-                return "pending", status or "processing"
-        return "error", f"no poll endpoint responded for id={rid}"
+            return "error", "no runId to poll"
+        code, payload = http(f"{self.endpoint}/nodes/runs/{rid}",
+                             headers=self.auth_headers())
+        if code != 200:
+            return "error", f"{code}: {str(payload)[:200]}"
+        url = find_video_url(payload)
+        if url:
+            return "done", url
+        status = find_status(payload)
+        if status in ("failed", "error", "cancelled", "canceled"):
+            return "error", str(_dig(payload, ("error", "message")) or payload)[:300]
+        return "pending", status or "processing"
 
 
 class FalBackend(Backend):
@@ -391,6 +459,77 @@ def build_jobs(plan: dict, detect: dict, only: str | None) -> tuple[list[dict], 
     return jobs, skipped
 
 
+def live_cost_and_balance(jobs: list[dict]) -> dict:
+    """
+    Ask each API platform for its real balance and a real pre-run cost estimate.
+    Returns {} when no platform supports it. Never raises — this is advisory.
+    """
+    out: dict = {}
+    by_platform: dict[str, list[dict]] = {}
+    for j in jobs:
+        by_platform.setdefault(j["pid"], []).append(j)
+
+    for pid, group in by_platform.items():
+        be = make_backend(group[0]["platform"], int(group[0]["account"]))
+        if be is None or not be.auth_headers():
+            continue
+        entry: dict = {}
+
+        if hasattr(be, "balance"):
+            try:
+                bal = be.balance()  # type: ignore[attr-defined]
+                if bal:
+                    entry["balance"] = bal
+            except Exception:
+                pass
+
+        if hasattr(be, "estimate"):
+            try:
+                est = be.estimate([g["shot"] for g in group])  # type: ignore[attr-defined]
+                if est:
+                    entry["estimate"] = est
+                    total = _dig(est, ("totalMicrocredits", "total_microcredits"))
+                    if isinstance(total, (int, float)):
+                        entry["estimated_credits"] = total / 1_000_000
+            except Exception:
+                pass
+
+        if entry:
+            entry["shots"] = [g["id"] for g in group]
+            out[pid] = entry
+
+    return out
+
+
+def all_account_balances(detect: dict, platform_id: str) -> list[dict]:
+    """Balance for every configured account on one platform — for `--balances`."""
+    plat = next((p for p in detect.get("platforms", [])
+                 if p["id"] == platform_id), None)
+    if not plat:
+        return []
+    rows = []
+    for n in range(1, int(plat.get("accounts", 1)) + 1):
+        be = make_backend(plat, n)
+        row: dict = {"account": n}
+        if be is None:
+            row["error"] = "no backend implemented"
+        elif not be.auth_headers():
+            row["error"] = "no key in environment"
+        elif hasattr(be, "balance"):
+            try:
+                bal = be.balance()  # type: ignore[attr-defined]
+                if bal:
+                    row.update(bal)
+                else:
+                    row["error"] = "balance endpoint did not respond"
+            except Exception as e:
+                row["error"] = f"{type(e).__name__}: {e}"
+        else:
+            row["error"] = "platform does not expose a balance endpoint"
+        rows.append(row)
+    return rows
+
+
 def run_job(job: dict, outdir: Path, timeout: int) -> dict:
     sid, pid = job["id"], job["pid"]
     be = make_backend(job["platform"], int(job["account"]))
@@ -448,6 +587,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--timeout", type=int, default=POLL_TIMEOUT)
     ap.add_argument("--check", action="store_true",
                     help="report which platforms are API-callable right now")
+    ap.add_argument("--balances", metavar="PLATFORM",
+                    help="show live credit balance for every account on a platform")
     args = ap.parse_args(argv)
 
     detect = fleet_json("detect")
@@ -466,6 +607,26 @@ def main(argv: list[str] | None = None) -> int:
                 "cost_warning": p.get("cost_warning", ""),
             })
         print(json.dumps({"mode": detect.get("mode"), "platforms": rows}, indent=2))
+        return 0
+
+    if args.balances:
+        rows = all_account_balances(detect, args.balances)
+        if not rows:
+            print(json.dumps({
+                "error": f"platform {args.balances!r} not found in fleet config",
+            }, indent=2))
+            return 1
+        usable = [r for r in rows if "error" not in r]
+        total = sum(r["available"] for r in usable
+                    if isinstance(r.get("available"), (int, float)))
+        print(json.dumps({
+            "platform": args.balances,
+            "accounts": rows,
+            "usable_accounts": len(usable),
+            "total_available": total or None,
+            "hint": "The account with the most credits is used first when "
+                    "prefer_fullest_account is on.",
+        }, indent=2, ensure_ascii=False))
         return 0
 
     if not args.plan:
@@ -487,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- dry run (default) ----
     if not args.confirm:
-        print(json.dumps({
+        out: dict[str, Any] = {
             "dry_run": True,
             "mode": detect.get("mode"),
             "would_generate": [
@@ -496,16 +657,26 @@ def main(argv: list[str] | None = None) -> int:
             ],
             "skipped": skipped,
             "paid_shots": len(paid_jobs),
-            "next_step": (
-                "Nothing was generated. Present the Routing Gate to the user, get an "
-                "explicit choice, then re-run with --confirm"
-                + (" --allow-paid" if paid_jobs else "") + "."
-            ),
-            "warning": (
+        }
+
+        # Real numbers where the platform can give them, so the Routing Gate
+        # quotes actual cost and actual balance rather than a guess.
+        live = live_cost_and_balance(jobs)
+        if live:
+            out["live"] = live
+
+        out["next_step"] = (
+            "Nothing was generated. Present the Routing Gate to the user with the "
+            "cost figures above, get an explicit choice, then re-run with --confirm"
+            + (" --allow-paid" if paid_jobs else "") + "."
+        )
+        if paid_jobs:
+            out["warning"] = (
                 "Some shots would use platforms requiring purchased credits. "
-                "Quote the estimate and get approval before using --allow-paid."
-            ) if paid_jobs else None,
-        }, indent=2, ensure_ascii=False))
+                "Quote the estimate, say pricing must be verified, and get "
+                "approval before using --allow-paid."
+            )
+        print(json.dumps(out, indent=2, ensure_ascii=False))
         return 0
 
     # ---- paid gate ----
