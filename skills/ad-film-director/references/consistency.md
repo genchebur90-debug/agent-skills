@@ -12,6 +12,13 @@ Two separate problems, often confused:
 - **Character consistency** — a person or mascot must be recognisably the same, within one
   ad and across a campaign that may run for months.
 
+**Before anything below: know what "identical" means for this product.** A burger has no
+label, a car has no cap, an apartment cannot be put on a black sweep. `identity-spec.md`
+gives the three-to-six features per product family whose change makes a buyer say "that's
+not it", and the four questions that extract them in Phase 1. Everything here assumes that
+list exists and is recorded — an unrecorded identity is the reason a campaign keeps its
+model and loses its bottle.
+
 ---
 
 ## Part 1 — Product consistency
@@ -24,6 +31,36 @@ No amount of prompt detail fixes this.
 
 Therefore: **always ask for real product photos in Phase 1.** If none exist, say plainly
 that the product in the ad will not be their product, and offer the alternatives below.
+
+### The lock card — the identity has to travel
+
+Recording the plate is not enough on its own. A production runs for dozens of turns; by the
+eighth shot the exact wording of the label, the state of the cap and the colour of the collar
+are simply no longer in anyone's attention, and the prompt gets written from memory. That is
+the observed failure: the character survives because a `prompt_lock` string is pasted into
+every prompt, and the product drifts because nothing carried its identity forward.
+
+So the identity is stored as data and reprinted wherever the product appears:
+
+```bash
+python3 scripts/campaign.py lockcard --text          # every locked thing
+python3 scripts/campaign.py lockcard --product noir-50
+```
+
+The card goes **beside** the prompt, never inside it — on the packet page, in the review, in
+your own working notes. `packet.py` embeds it in every shot page automatically. What goes in
+the prompt itself is a pointer: *"the flacon from @Image1"*. Copying the card's contents into
+the prompt body would be the second description of the object, which is the thing
+`production-order.md` forbids, and `planlint.py` warns when a prompt starts spelling out a
+locked product's material, colour or label.
+
+Three artefacts, three jobs, and it is worth keeping them straight:
+
+| Artefact | Where it lives | What it is for |
+|---|---|---|
+| The plate | attached to the generation as `@Image1` | *being* the product |
+| The lock card | beside the prompt, on the packet page | letting a human verify the output |
+| The verify fields | `campaign.py verify --product X` | recording that the check happened |
 
 ### The canonical frame workflow
 
@@ -71,9 +108,53 @@ Check `platforms.md` and the platform's own current docs for which of these exis
 
 ### Reality checks
 
-- Small text on packaging degrades in almost every model. If the label copy must be legible,
-  plan to **composite it in post** rather than generate it. The `video-editor` skill can
-  overlay a clean logo or label graphic.
+- **Never generate a blank product. The label is the product.** A bottle without its logo is
+  not the brand's bottle, it is a generic object, and any frame containing one is a rejected
+  frame. This is not a stylistic preference: on a fragrance, a cosmetic, a drink or any
+  branded pack, the type *is* what is being advertised.
+
+  Small text on packaging does degrade in many models, which tempts you to leave it out.
+  Leaving it out is the worse failure — a garbled logo is fixable, an absent one means you
+  photographed the wrong product. Order of preference:
+
+  1. **Ask for the label, then verify it.** Spell out the exact wording, the line order, the
+     relative size of each line and its colour, and require that it sit flat and level on the
+     surface. Current image models often render short brand type correctly at high
+     resolution, accents included. Then *read the output* — letter by letter, against the
+     reference photograph.
+  2. **Regenerate** when it comes out garbled, misspelled or crooked. Two or three passes is
+     normal for type, and that is cheaper than shipping the wrong product.
+  3. **Composite in post** only once generation has repeatedly failed. `video-editor` can
+     overlay a clean logo or label graphic onto the finished plate.
+
+  Whichever route you take, the frame you hand over carries the label. If you find yourself
+  writing "no text on the product" into a prompt, stop — you are about to generate the wrong
+  product. The only legitimate exception is a shot where the pack is genuinely turned away
+  from camera, and that must be stated in the shot note.
+
+  Recorded because it happened: two hours of a client's time went to blank bottles produced by
+  a self-imposed "no text on the glass" instruction. When the ban was removed the model
+  rendered a three-line brand lockup, circumflex and all, correctly on the first attempt. The
+  ban was both harmful and unnecessary.
+
+- **A complete product includes its closure.** A pack shot with the cap missing is a rejected
+  frame — a bare pump nozzle reads as a product in use, not a product presented. The cap may
+  be off only in a shot where the product is actually being used, and that must be stated in
+  the shot note.
+
+- **Transparent liquid does not glow — it transmits.** Asking for a backlit "luminous" fill
+  produces a flat pale disc that reads as frosted plastic, and this is the most common way a
+  glass product turns fake. Glass proves itself by what is visible THROUGH it: put a hand,
+  skin, or a known background behind the vessel and ask for it magnified and displaced by the
+  glass, out of register with the same subject outside the glass edge. Light the front, keep
+  the background black, and the gaps between the fingers behind will read dark through the
+  liquid — which is exactly what sells it.
+
+  Then measure the interior rather than trusting your eye: a transparent fill sits near the
+  reference's interior luminance, a milky one measures 60–90 points brighter. Measured on one
+  campaign: reference 112, correct version 118, the two failed "luminous" versions 176 and 191.
+  Over-correcting is possible too — a fully colourless fill made the bottle read empty, and
+  the fix was to restore the product's own tint while keeping it see-through.
 - Reflective and transparent products drift most, because the model must invent what they
   reflect. Keep their surroundings simple and dark.
 - If a product has an unusual shape, expect the model to normalise it toward something
@@ -145,6 +226,23 @@ Often overlooked, and it undermines an ad as much as a drifting product.
   apply one consistent look in post via `video-editor`. Colour consistency achieved in the
   grade is reliable; colour consistency achieved by prompting is not.
 
+### When a lock and a learned pattern disagree
+
+A style lock — `.campaign/STYLE-LOCK.txt`, or the `prompt_lock` recorded against a registered
+product or character — is the highest authority in a project. A pattern learned from a
+reference ad (`reference-ledger.md`) never overrides it, however well that reference performed.
+
+Strict order, highest first:
+
+1. **The project's style lock.**
+2. **The user's explicit instruction in this conversation.**
+3. **A promoted pattern from the reference ledger.**
+4. **The skill's general defaults.**
+
+When a reference pulls against a lock, name the conflict in one line instead of silently
+resolving it: *"this reference is warm and sunlit, your lock is pure black — keeping the lock."*
+That sentence is often where the user discovers the lock itself needs revising.
+
 ---
 
 ## Part 4 — The preservation clause
@@ -175,3 +273,18 @@ Run through this every time. It takes seconds and saves regeneration credits.
 
 Any failure: regenerate rather than accept. **Flag the cost of the retry to the user first**
 if regeneration consumes paid credits.
+
+**Run it as fields, not as questions.** A question with no field to fill gets skipped, and
+"is the product still the product?" has been skipped in every project that ever shipped the
+wrong bottle:
+
+```bash
+python3 scripts/identity.py sheet --plate <plate> --candidates <clip-or-frame> --out review/identity.png
+#   → open review/identity.png. The plate is on the left. Compare, do not admire.
+python3 scripts/campaign.py verify --product <name> --shot <id>
+#   → every field starts UNCHECKED. Answer each one out loud in your reply.
+```
+
+`identity.py check` adds advisory numbers — interior luminance, proportions, detail density —
+which catch a milky fill, a normalised silhouette and a vanished label. They are support, not
+a verdict: no statistic reads a label. The comparison image is the check.

@@ -27,6 +27,12 @@ Each entry gives you seven things to put into your shot prompts:
 | **Pace** | Cut rhythm and total length that suits the category. |
 | **Register fit** | Which creative registers work, which fight the product. |
 
+**Register fit names the obvious fits only** — the four that carry most commercial work. The
+six higher-variance registers in `creative-registers.md` (process documentary, mockumentary,
+retro pastiche, sensory, hyper-stylised graphic, absurdist) are available to every category
+here, and choosing one changes the *treatment* below, not the physics. A burger lit for
+absurdism is still lit from behind-above; the steam is just happening somewhere it shouldn't.
+
 A universal rule that survives every category: **move the camera for big things, move the
 object for small things.** A car wants a tracking camera; a lipstick wants a still camera and
 a rotating product.

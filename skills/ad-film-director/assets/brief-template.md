@@ -64,7 +64,17 @@ useful but optional.
 
 **Tone you want**
 <!-- Funny / straightforward / premium and atmospheric / like a real customer filmed it.
-     Leave blank for a recommendation with reasoning. -->
+     Leave blank and you'll get a slate instead: 3–5 different concepts, safe through
+     strange, each written out far enough to picture. Filling this in is a shortcut —
+     it locks the register and skips the slate, which is the right move only if you
+     already know. -->
+
+
+**How strange are you willing to go?**
+<!-- 0–10, where 0 is the ad your category already makes and 10 is one nobody has made.
+     Blank means the slate is centred around 4 with one safe option and one strange one.
+     Lower it for regulated categories and cold paid traffic; raise it for organic
+     feeds and crowded categories. -->
 
 
 **Anything that must appear**

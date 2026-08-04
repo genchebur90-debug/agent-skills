@@ -19,6 +19,7 @@ Before capability, ask: **can the agent call it, or must a human click?**
 
 | Access type | Meaning | Consequence |
 |---|---|---|
+| **host** | The agent's own environment renders it | Agent generates directly, spending none of the user's credits |
 | **api** | Working API, key present, credits available | Agent generates directly |
 | **ui** | Subscription is web-only, or API not included in the plan | Agent writes a packet, human generates |
 | **api-paid** | API exists but needs credits bought separately | **Warn with an estimate, ask first** |
@@ -27,6 +28,51 @@ A crucial and frequently misunderstood point: **most consumer AI subscriptions d
 API access.** The web plan and the API are usually separate products with separate billing.
 Having a paid subscription does *not* imply programmatic access. Always check the `access`
 field in the fleet config rather than assuming.
+
+## The overlap trap — the most expensive routing mistake
+
+Aggregator platforms resell the same frontier models everyone else has. So a user's paid
+subscription and the agent's own host tools routinely overlap on the biggest names, and
+routing a shot to the paid platform out of habit spends a credit to get something that was
+already free.
+
+**The value of a subscription is the models nobody else has, not the ones it shares.** Before
+routing any shot, ask which platform *uniquely* offers what this shot needs. `fleet.py
+inventory` computes the overlap automatically and emits an `also_on_host` warning listing the
+duplicated models — read it and route accordingly.
+
+Three things justify paying when a host route exists, and they are all ceilings rather than
+preferences:
+
+- **Resolution.** Host video is commonly capped below 4K. A shot that must be delivered in 4K
+  is a legitimate reason to spend.
+- **Clip length.** Host clips are short (often 8s). A single unbroken longer take can't be
+  faked by stitching.
+- **A model the host lacks entirely.** This is the main event — the genuinely different
+  aesthetic or capability the subscription was bought for.
+
+Say which ceiling forced the decision when you route a shot to a paid platform. "Higher
+quality" is not a reason; "needs 4K for the client master" is.
+
+## Credit pools expire — spend them or lose them
+
+Most subscription credits reset monthly and **do not roll over**. That makes a monthly pool an
+allowance, not a reserve, and it changes production planning: credits sitting unused three days
+before a reset are about to become nothing.
+
+Record `resets` and `renews_on` in the fleet config so `inventory` can warn before the deadline.
+When a large pool is close to resetting, say so — it is often the moment to shoot the ambitious
+variant rather than the safe one.
+
+Two more billing realities worth carrying into every estimate:
+
+- **The displayed price can be an estimate, not the bill.** Some platforms show a figure on the
+  generate button that the final charge exceeds, occasionally by multiples. Read the usage log
+  after a run rather than trusting the panel, and never quote a platform's estimate to the user
+  as a certainty.
+- **Cost varies enormously *within* one model.** Duration, resolution, quality tier and optional
+  features can swing the price by an order of magnitude under the same model name. "Which model"
+  is not enough to predict cost; the configuration is what bills.
 
 ## Capability map — what to route where
 
@@ -42,6 +88,9 @@ Match the shot's need to a platform's strength, not to whatever is cheapest.
 | Character across many shots | Reference-image conditioning | See `consistency.md` |
 | Product move landing on exact framing | First-and-last-frame interpolation | Strong control when available |
 | Clip with usable synchronised audio | Native audio generation | Rare and valuable; most models are silent |
+| Cuts or changes landing on a musical beat | **Audio reference input** | Supply the real track as a reference and instruct changes onto its beats. Beat-syncing in post is the fallback, not the method |
+| A specific movement, exactly | **Video reference input** | Pass a clip of the move; described motion is reinvented every generation |
+| Several looks or variants on one subject | Many reference images in one call | 5–9 image slots means one call, not one per variant |
 | Stylised, comedic, meme-register | Stylisation over realism | Realism is not the goal here |
 
 ## Landscape notes (mid-2026 — verify before relying)
@@ -65,14 +114,52 @@ Written as guidance about *kinds* of capability, since specific versions move fa
   have open weights if self-hosting matters.
 - **MiniMax Hailuo** — economical drafts, high-motion social content.
 - **Pika** — stylised work and multi-asset composition.
-- **ByteDance Seedance** — technically strong but **subject to access restrictions in some
-  regions following 2026 legal disputes**. Verify availability and licensing before using it
-  for commercial work.
+- **ByteDance Seedance (2.0 line)** — the strongest multimodal reference model available at the
+  time of writing: one call accepts images, video and audio together (see the verified contract
+  below), holds a subject across changes, and outputs up to 15s of multi-shot video with
+  dual-channel audio. ByteDance's own materials describe output as watermark-free and cleared for
+  commercial use — but **licensing and regional availability still need checking in your own
+  jurisdiction** before commercial delivery; there were access restrictions reported after the 2026
+  legal disputes. Reachable both through consumer UIs (mitte and others) and through aggregators.
 
 Aggregators (**fal.ai**, **Replicate**, **magica.ai**) front many of these behind one key
 with a uniform async pattern — submit, receive a request id, poll until complete. Useful
 when your subscriptions don't cover a needed capability. Verify model identifiers before
 use; they change.
+
+### Seedance 2.0 — verified input contract (2026-07-31)
+
+Worth writing down exactly, because guessing at it produces invented limitations. Confirmed
+against the live schema and ByteDance's own published materials.
+
+**Mixed-modality input in a single call**, addressed from inside the prompt with `@` handles:
+
+| Input | Handle | Limit |
+|---|---|---|
+| Images | `@Image1`, `@Image2`… | up to 9 |
+| Video clips | `@Video1`… | up to 3, 2–15s combined |
+| Audio clips | `@Audio1`… | up to 3, ≤15s combined, mp3/wav |
+
+Prompts address them directly: `@Image1 as the first frame, reference @Video1 for the camera
+movement, use @Audio1 for the music`. Two entry modes exist — first/last frame (one image plus a
+prompt) and universal reference (the mixed set above).
+
+Output: 4–15s, six aspect ratios including `9:16`, native ceiling **2K** with 4K promised in a
+later release, optional generated audio.
+
+**What ByteDance itself names as still-weak**, which is more useful than any strength list:
+
+- **Multi-subject consistency.** Multi-subject *interaction* is a headline strength, but holding
+  two identities without drift is not. Two locked characters in one frame is a risk to design
+  around — separate clips, or one in focus — rather than a wall.
+- **Text rendering accuracy.** So prices, labels, legible copy and UI chrome stay in the edit.
+  A cursor or a simple shape may well render; test it once cheaply rather than assuming either way.
+- **Complex editing effects.**
+
+**Delivery differs by route, and it matters.** The consumer UI takes local files by drag and drop.
+The aggregator API accepts **public HTTPS URLs only** — a plate sitting behind an authenticated
+URL cannot be fetched, which reads as "the model won't take images" when in fact the files never
+arrived. Publish the plates first, or work in the UI.
 
 ### magica.ai API shape (verified 2026-07-26)
 

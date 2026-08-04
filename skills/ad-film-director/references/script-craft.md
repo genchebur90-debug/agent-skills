@@ -3,6 +3,10 @@
 Load in Phase 5. A great-looking ad with a weak script fails; a plain-looking ad with a
 strong script often works. The script is where the persuasion actually lives.
 
+You arrive here with a concept locked in Phase 2c: one claim, one register, one proof shot,
+and a known ending. This file turns that into a beat sheet. If any of the four is still open,
+go back — writing is not where you decide what the ad is.
+
 ---
 
 ## The numbers that govern short-form ads
@@ -21,6 +25,10 @@ reach, go shorter; if it's clicks, 15–30s on Meta is the sweet spot.
 **Sound.** 80–85% of Meta viewing is muted. TikTok is structurally sound-on. **Burned-in
 captions are mandatory for Meta and advisable everywhere.** Never let a joke, a claim or a
 CTA exist only in audio.
+
+The one exception is the **sensory / ASMR** register, where sound *is* the product. It runs
+on sound-on placements only, carries an on-screen "sound on" cue in the first half-second,
+and needs a separate cut for Meta that survives muted. Details in `creative-registers.md`.
 
 ---
 
@@ -53,6 +61,8 @@ honest. Length 9–20s.
 One unbroken action: the pour, the unboxing, the bite, the door opening. No cuts, no
 narration. Works because it's inherently credible.
 Best for: food, gloss products, luxury. Length 6–15s.
+Run it in real time with the sound isolated and no music and it becomes the **sensory /
+ASMR** register — same structure, sound doing the persuading.
 
 ### Comic Premise
 Setup, escalation, turn, product as resolution. See `creative-registers.md`. Length 15–20s.
@@ -64,6 +74,29 @@ Best for: fragrance, jewellery, property, fashion. Length 15–30s.
 ### Listicle / Rapid Cuts
 "Three reasons…" — fast, caption-driven, works muted. Cheap to produce and easy to vary
 for A/B. Best for: apps, services, multi-feature products. Length 12–20s.
+Cut to a track with one repeating graphic device and it carries the **hyper-stylised
+graphic** register.
+
+### Making Sequence
+Raw → worked → changed → finished. The transformation is the argument and no claim is stated.
+The viewer must feel time passing, so each stage needs a visible change, not a new angle.
+Best for: food with a kitchen behind it, handmade goods, anything where price is the
+objection. Register: process / craft documentary. Length 15–30s.
+
+### Format Borrow
+The ad adopts another format's grammar wholesale — an interview, a news report, a 1994
+infomercial, a safety briefing — and plays it straight. The recognition *is* the hook, so it
+must be legible in the first second, and the product has to belong inside the format rather
+than interrupt it.
+Best for: challenger brands, categories whose own advertising is uniform. Registers:
+mockumentary, retro pastiche. Length 15–30s.
+
+### Wrong World
+One impossible rule, established in frame one, never explained, everyone behaving normally.
+No setup and no punchline — the strangeness is the state, not an event. The product is the
+only sane object on screen, and the last two seconds are plain and legible.
+Best for: saturated categories, undifferentiated products, brand campaigns on organic feeds.
+Register: absurdist / surreal. Length 15–20s.
 
 ---
 
@@ -152,6 +185,10 @@ One CTA, late, specific.
 - Match the funnel: cold traffic gets a low-commitment ask (watch, learn, try); warm traffic
   gets the purchase ask.
 - Arthouse register: the brand mark alone is the CTA. Asking directly breaks the spell.
+- High-variance registers — absurdist, sensory, retro, graphic — earn attention but lose
+  recall. Their last two seconds must be flat and legible: product, name, one line. Test it
+  by showing only those two seconds to someone; if they can't name the product, the ad
+  bought attention and spent it on nothing.
 
 ---
 
@@ -175,7 +212,10 @@ which platform can generate each shot and therefore what it costs.
 For several accounts you need real variants, not re-crops. What to change, in order of impact:
 
 1. **The hook** — highest-leverage single change. Same body, three different openings.
-2. **The register** — UGC version and polished version of the same claim.
+2. **The register** — UGC version and polished version of the same claim. **The Phase 2b
+   slate is already this list**: the concepts the user didn't pick are the strongest variant
+   set you will ever have, because they were built to differ. Before inventing variants,
+   look at what you already showed them.
 3. **The claim** — lead with a different benefit.
 4. **Length** — a 9s cutdown of a 20s ad performs differently, not just shorter.
 5. **The CTA** — different offer or urgency.

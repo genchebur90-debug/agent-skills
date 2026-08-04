@@ -14,7 +14,13 @@ Usage:
     campaign.py init --name shampoo-summer [--brand "Acme"]
     campaign.py add-character --name mascot --refs a.png b.png c.png
     campaign.py character --name mascot                  # show refs + prompt lock
-    campaign.py add-product --name shampoo-500 --refs bottle.jpg
+    campaign.py add-product --name shampoo-500 --refs bottle.jpg --profile pack \\
+                         --identity "amber 500ml pump bottle, three-line black lockup" \\
+                         --label-lines "ACME" "REPAIR" "500 ml" --closure "black pump cap on"
+    campaign.py product --name shampoo-500                # plate, lock card, gaps
+    campaign.py lockcard --text                           # paste into every prompt
+    campaign.py verify --product shampoo-500 --shot s3    # per-clip check fields
+    campaign.py profiles                                  # identity by product family
     campaign.py register --variant v1 --account ig_main --platform reels \\
                          [--hook "..."] [--register ugc] [--file deliver/reels.mp4]
     campaign.py check --account ig_main                   # what has this account had?
@@ -194,27 +200,317 @@ def cmd_character(args) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Product identity — the half of consistency that used to be prose only
+# ---------------------------------------------------------------------------
+#
+# Characters were instrumented from the start: prompt_lock, seed, wardrobe,
+# lighting, all stored and repeated verbatim. Products were not — they got a
+# folder of photographs and a sentence of advice. That asymmetry is exactly
+# what a real campaign fails on: the model stays itself because its lock is
+# text that gets pasted into every prompt, while the bottle drifts because
+# nothing carried its identity into the prompt at all.
+#
+# So a product now stores an IDENTITY SPEC: the few facts a buyer uses to
+# recognise this object and no other. `lockcard` prints them as a block that
+# goes into every shot prompt, every packet page and every review.
+
+# What "identity" means per family of product. The keys are advisory: they tell
+# the agent which questions to answer, and planlint warns when they are empty.
+PROFILES: dict[str, dict] = {
+    "pack": {
+        "label": "bottle, jar, tube, box, can, fragrance, cosmetics, drinks",
+        "identity": ["exact label wording and line order", "logo lockup",
+                     "closure/cap present", "silhouette of the vessel",
+                     "material and tint", "fill level and liquid colour"],
+    },
+    "food": {
+        "label": "burger, pizza, coffee, ice cream, plated dishes",
+        "identity": ["build and layer order", "portion size and proportions",
+                     "doneness and colour", "garnish and sauce",
+                     "vessel or wrapper it is served in"],
+    },
+    "vehicle": {
+        "label": "cars, motorcycles, bikes, boats, machinery",
+        "identity": ["model and body shape", "grille and light signature",
+                     "wheel design", "body colour and finish", "badges",
+                     "trim details that differ between versions"],
+    },
+    "space": {
+        "label": "apartments, houses, hotels, restaurants, gyms, clinics",
+        "identity": ["layout and sightlines", "window shape and view",
+                     "floor and wall finishes", "fixed furniture",
+                     "light direction and time of day"],
+    },
+    "apparel": {
+        "label": "clothing, shoes, bags, jewellery, watches",
+        "identity": ["cut and silhouette", "colourway", "material and weave",
+                     "hardware and fastenings", "logo placement",
+                     "dial/face details for watches"],
+    },
+    "device": {
+        "label": "phones, laptops, appliances, hardware, tools",
+        "identity": ["form factor and proportions", "port and button layout",
+                     "finish and colour", "branding placement",
+                     "screen content if the screen is visible"],
+    },
+    "screen": {
+        "label": "apps, SaaS, dashboards, games",
+        "identity": ["real UI, captured not invented", "brand colours and type",
+                     "the exact screen states shown", "cursor/gesture behaviour"],
+    },
+    "service": {
+        "label": "salons, courses, travel, logistics, insurance",
+        "identity": ["the proof object the buyer sees", "staff look and uniform",
+                     "environment and signage", "documents or interfaces shown"],
+    },
+    "person": {
+        "label": "a founder, a creator, a named spokesperson",
+        "identity": ["face and build", "wardrobe", "hair", "voice and accent",
+                     "setting they always appear in"],
+    },
+}
+
+
+def cmd_profiles(args) -> dict:
+    return {"profiles": {k: {"covers": v["label"], "identity_is": v["identity"]}
+                         for k, v in PROFILES.items()},
+            "use": "campaign.py add-product --name X --profile pack --refs photo.jpg ...",
+            "note": "The profile only decides which questions to answer. Any product "
+                    "not on the list: pick the nearest and add --must items by hand."}
+
+
 def cmd_add_product(args) -> dict:
     data, path = need_campaign(args.campaign)
     refs = store_refs(data["name"], "products", args.name, args.refs)
-    data["products"][args.name] = {
+    profile = (args.profile or "").strip().lower()
+    if profile and profile not in PROFILES:
+        return {"error": f"unknown profile {profile!r}", "known": sorted(PROFILES)}
+
+    prev = data["products"].get(args.name, {})
+    rec = {
         "name": args.name,
         "refs": refs,
-        "category": args.category or "",
-        "lighting": args.lighting or "",
-        "added": now(),
+        "profile": profile or prev.get("profile", ""),
+        "category": args.category or prev.get("category", ""),
+        "identity": args.identity or prev.get("identity", ""),
+        "label_lines": args.label_lines or prev.get("label_lines", []),
+        "closure": args.closure or prev.get("closure", ""),
+        "colour": args.colour or prev.get("colour", ""),
+        "material": args.material or prev.get("material", ""),
+        "must": args.must or prev.get("must", []),
+        "forbid": args.forbid or prev.get("forbid", []),
+        "lighting": args.lighting or prev.get("lighting", ""),
+        "prompt_lock": args.prompt_lock or prev.get("prompt_lock", ""),
+        "seed": args.seed if args.seed is not None else prev.get("seed"),
+        "platform": args.platform or prev.get("platform", ""),
+        "model": args.model or prev.get("model", ""),
+        "added": prev.get("added") or now(),
+        "updated": now(),
     }
+    data["products"][args.name] = rec
     save(data, path)
+
     real = [r for r in refs if "stored" in r]
+    gaps = _product_gaps(rec)
     return {
         "product": args.name,
         "stored_refs": [r["stored"] for r in real],
         "missing": [r["source"] for r in refs if "error" in r],
+        "identity_gaps": gaps or None,
         "warning": None if real else (
             "No real product photo stored. Without one the model will invent a "
             "product that is not the user's — the label will be wrong. Ask for photos."
         ),
-        "rule": "Generate product shots image-to-video from these refs, not text-to-video.",
+        "next": "python3 scripts/campaign.py lockcard --product " + args.name,
+        "rule": "Generate product shots from these refs (image-to-video or "
+                "reference-to-video), never text-to-video, and paste the lock card "
+                "into every shot prompt.",
+    }
+
+
+def _product_gaps(rec: dict) -> list[str]:
+    """Which identity questions this product has not answered yet."""
+    gaps = []
+    if not any("stored" in r for r in rec.get("refs", [])):
+        gaps.append("no real photograph stored — the plate is the product, "
+                    "everything else is invention")
+    if not rec.get("identity") and not rec.get("must"):
+        gaps.append("no identity sentence and no --must features: nothing tells a "
+                    "later prompt what makes this object recognisable")
+    prof = PROFILES.get(rec.get("profile", ""))
+    if not rec.get("profile"):
+        gaps.append("no --profile: pick one from `campaign.py profiles` so the right "
+                    "identity questions get asked")
+    elif prof:
+        if prof is PROFILES.get("pack") and not rec.get("label_lines"):
+            gaps.append("packaging with no --label-lines: the type IS the product, and "
+                        "an unspecified label is the most common way the wrong product "
+                        "ships")
+        if prof is PROFILES.get("pack") and not rec.get("closure"):
+            gaps.append("no --closure note: a pack shot with the cap missing reads as "
+                        "in-use, not as presented")
+    return gaps
+
+
+def _lock_lines(rec: dict) -> list[str]:
+    """The block that must be repeated verbatim wherever this product appears."""
+    plate = [r.get("stored") or r["source"] for r in rec.get("refs", [])]
+    out = [f"PRODUCT LOCK — {rec['name']}"]
+    if rec.get("identity"):
+        out.append(f"  identity      : {rec['identity']}")
+    if rec.get("profile"):
+        out.append(f"  profile       : {rec['profile']}")
+    if plate:
+        out.append(f"  plate         : {', '.join(plate)}")
+        out.append("                  ^ this image IS the product. It enters the prompt "
+                   "as an image, never as a description.")
+    if rec.get("label_lines"):
+        out.append("  label         : " + " / ".join(rec["label_lines"])
+                   + "  (flat, level, legible, spelled exactly)")
+    if rec.get("closure"):
+        out.append(f"  closure       : {rec['closure']}")
+    if rec.get("material"):
+        out.append(f"  material      : {rec['material']}")
+    if rec.get("colour"):
+        out.append(f"  colour        : {rec['colour']}")
+    if rec.get("must"):
+        out.append("  must appear   : " + "; ".join(rec["must"]))
+    if rec.get("forbid"):
+        out.append("  never         : " + "; ".join(rec["forbid"]))
+    if rec.get("lighting"):
+        out.append(f"  lighting      : {rec['lighting']}")
+    if rec.get("prompt_lock"):
+        out.append(f"  verbatim      : {rec['prompt_lock']}")
+    if rec.get("seed") is not None:
+        out.append(f"  seed          : {rec['seed']}")
+    return out
+
+
+def _character_lock_lines(rec: dict) -> list[str]:
+    plate = [r.get("stored") or r["source"] for r in rec.get("refs", [])]
+    out = [f"CHARACTER LOCK — {rec['name']}"]
+    if plate:
+        out.append(f"  plates        : {', '.join(plate)}")
+    for key, label in (("wardrobe", "wardrobe      "), ("lighting", "lighting      "),
+                       ("prompt_lock", "verbatim      ")):
+        if rec.get(key):
+            out.append(f"  {label}: {rec[key]}")
+    if rec.get("seed") is not None:
+        out.append(f"  seed          : {rec['seed']}")
+    out.append("  generate from the plates, never from a frame of the last video")
+    return out
+
+
+def cmd_product(args) -> dict:
+    data, _ = need_campaign(args.campaign)
+    pr = data["products"].get(args.name)
+    if not pr:
+        return {"error": f"no product named {args.name!r}",
+                "known": list(data["products"])}
+    return {
+        "product": pr["name"],
+        "use_these_refs": [r.get("stored") or r["source"] for r in pr["refs"]],
+        "lock_card": "\n".join(_lock_lines(pr)),
+        "identity_gaps": _product_gaps(pr) or None,
+        "seed": pr.get("seed"),
+        "reminder": "Keep clips 3-5s. Verify each clip against the plate, not against "
+                    "the previous clip.",
+    }
+
+
+def cmd_lockcard(args) -> dict:
+    """Print the block that goes into every shot prompt and every packet page."""
+    data, _ = need_campaign(args.campaign)
+    blocks: list[str] = []
+    unknown: list[str] = []
+
+    prods = args.product or ([] if args.character else list(data["products"]))
+    chars = args.character or ([] if args.product else list(data["characters"]))
+
+    for name in prods:
+        rec = data["products"].get(name)
+        if rec:
+            blocks.append("\n".join(_lock_lines(rec)))
+        else:
+            unknown.append(name)
+    for name in chars:
+        rec = data["characters"].get(name)
+        if rec:
+            blocks.append("\n".join(_character_lock_lines(rec)))
+        else:
+            unknown.append(name)
+
+    card = "\n\n".join(blocks)
+    if args.text:
+        print(card)
+        return {}
+    return {
+        "campaign": data["name"],
+        "lock_card": card or None,
+        "unknown": unknown or None,
+        "paste_into": ["every shot prompt that contains this thing",
+                       "every page of the generation packet",
+                       "the review of every clip"],
+        "law": "Each thing is described in words exactly once. A product never — it "
+               "comes from its plate. This card exists so the plate is not forgotten, "
+               "not so the object can be re-described.",
+    }
+
+
+VERIFY_FIELDS = [
+    ("plate_used", "was this frame generated FROM the plate, not from words or from "
+                   "the previous clip?"),
+    ("silhouette", "same shape and proportions as the plate?"),
+    ("label", "wording, line order and spelling identical to the plate?"),
+    ("logo", "present, undistorted, correct position?"),
+    ("closure", "cap/lid/closure as specified, unless the shot note says in-use?"),
+    ("colour", "product's own colour and finish, not shifted by the grade?"),
+    ("must_appear", "every locked feature visible or deliberately out of frame?"),
+    ("forbidden", "nothing from the never-list present?"),
+    ("reserved_zone", "the caption area stayed dark and empty?"),
+    ("continuity", "light direction and time of day match the adjacent shots?"),
+]
+
+
+def cmd_verify(args) -> dict:
+    """Emit the per-clip product check as fields that must be filled in.
+
+    A question with no field gets skipped; a field with no verdict is visible.
+    That is the whole point: 'is the product still the product' was never
+    answered because nothing recorded that it had been asked.
+    """
+    data, _ = need_campaign(args.campaign)
+    pr = data["products"].get(args.product) if args.product else None
+    if args.product and not pr:
+        return {"error": f"no product named {args.product!r}",
+                "known": list(data["products"])}
+
+    checks = []
+    for key, question in VERIFY_FIELDS:
+        item = {"field": key, "question": question, "verdict": "UNCHECKED"}
+        if pr:
+            if key == "label" and pr.get("label_lines"):
+                item["expected"] = " / ".join(pr["label_lines"])
+            if key == "closure" and pr.get("closure"):
+                item["expected"] = pr["closure"]
+            if key == "colour" and pr.get("colour"):
+                item["expected"] = pr["colour"]
+            if key == "must_appear" and pr.get("must"):
+                item["expected"] = pr["must"]
+            if key == "forbidden" and pr.get("forbid"):
+                item["expected"] = pr["forbid"]
+        checks.append(item)
+
+    return {
+        "shot": args.shot or None,
+        "product": args.product or None,
+        "checks": checks,
+        "rule": "Any FAIL means regenerate, not ship. Flag the credit cost of the "
+                "retry before running it.",
+        "note": "Colour statistics cannot see any of this. Look at the frame, "
+                "side by side with the plate — scripts/identity.py sheet builds that "
+                "comparison image for you.",
     }
 
 
@@ -389,11 +685,49 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("character", help="show a character's refs and prompt lock")
     s.add_argument("--name", required=True)
 
-    s = sub.add_parser("add-product", help="store canonical product references")
+    s = sub.add_parser("add-product",
+                       help="store the product plate AND its identity lock")
     s.add_argument("--name", required=True)
-    s.add_argument("--refs", nargs="+", required=True)
-    s.add_argument("--category", default="", help="e.g. glossy-packaging, food")
+    s.add_argument("--refs", nargs="+", required=True,
+                   help="real photographs of the product. These are the product.")
+    s.add_argument("--profile", default="",
+                   help="pack | food | vehicle | space | apparel | device | screen | "
+                        "service | person. See `campaign.py profiles`.")
+    s.add_argument("--category", default="", help="art-direction category, e.g. "
+                                                  "glossy-packaging, food")
+    s.add_argument("--identity", default="",
+                   help="one sentence: what makes a buyer recognise THIS object")
+    s.add_argument("--label-lines", nargs="+", default=[], dest="label_lines",
+                   help="exact type on the pack, in order, top line first")
+    s.add_argument("--closure", default="",
+                   help="cap/lid state, e.g. 'silver cap on unless the shot is in-use'")
+    s.add_argument("--colour", default="", help="the product's own colour and finish")
+    s.add_argument("--material", default="", help="glass, matte plastic, brushed steel…")
+    s.add_argument("--must", nargs="+", default=[],
+                   help="features that must be visible in a product shot")
+    s.add_argument("--forbid", nargs="+", default=[],
+                   help="things that must never appear: wrong variant, extra bottles…")
     s.add_argument("--lighting", default="")
+    s.add_argument("--prompt-lock", default="", dest="prompt_lock",
+                   help="wording to repeat verbatim in every prompt")
+    s.add_argument("--seed", type=int)
+    s.add_argument("--platform", default="")
+    s.add_argument("--model", default="")
+
+    s = sub.add_parser("product", help="show a product's plate, lock card and gaps")
+    s.add_argument("--name", required=True)
+
+    sub.add_parser("profiles", help="product families and what identity means for each")
+
+    s = sub.add_parser("lockcard",
+                       help="the block to paste into every prompt and packet page")
+    s.add_argument("--product", nargs="+", help="default: every product")
+    s.add_argument("--character", nargs="+", help="default: every character")
+    s.add_argument("--text", action="store_true", help="plain text instead of JSON")
+
+    s = sub.add_parser("verify", help="per-clip product check, as fields to fill in")
+    s.add_argument("--product")
+    s.add_argument("--shot", help="shot id this check belongs to")
 
     s = sub.add_parser("register", help="record a variant going to an account")
     s.add_argument("--variant", required=True)
@@ -401,7 +735,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--platform", default="")
     s.add_argument("--file", default="")
     s.add_argument("--hook", default="")
-    s.add_argument("--register", default="", help="ugc | humour | commercial | arthouse")
+    s.add_argument("--register", default="", help="free text; ugc | humour | commercial | "
+                                                  "arthouse | process | mockumentary | "
+                                                  "retro | sensory | graphic | absurdist")
     s.add_argument("--claim", default="")
     s.add_argument("--length", type=float)
     s.add_argument("--scheduled", default="")
@@ -420,11 +756,14 @@ def main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "init": cmd_init, "add-character": cmd_add_character, "character": cmd_character,
-        "add-product": cmd_add_product, "register": cmd_register, "check": cmd_check,
+        "add-product": cmd_add_product, "product": cmd_product,
+        "profiles": cmd_profiles, "lockcard": cmd_lockcard, "verify": cmd_verify,
+        "register": cmd_register, "check": cmd_check,
         "next": cmd_next, "variants": cmd_variants, "status": cmd_status,
     }
     result = handlers[args.cmd](args)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if result:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
     return 1 if isinstance(result, dict) and ("error" in result or "blocked" in result) else 0
 
 

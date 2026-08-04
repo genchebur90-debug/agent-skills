@@ -8,6 +8,7 @@ possible, what it would cost, and what needs the user's approval first.
 
 Usage:
     fleet.py detect                       operating mode + usable platforms
+    fleet.py inventory                    what you own: plans, pools, expiry, overlap
     fleet.py budget                       remaining credits per account
     fleet.py plan --needs plan.json       routing options per shot, grouped by cost
     fleet.py pick --need video --best-for physical-realism
@@ -24,6 +25,7 @@ built-in parser handles the subset of YAML this config needs.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -39,6 +41,7 @@ from typing import Any
 ACCESS_API = "api"            # agent can call it; credits already owned
 ACCESS_UI = "ui"              # human generates in browser; credits already owned
 ACCESS_API_PAID = "api-paid"  # agent could call it, but credits must be bought
+ACCESS_HOST = "host"          # the agent's own host renders it; costs no fleet credits
 ACCESS_OFF = "off"
 
 # Marker vocabulary shared with SKILL.md §3 so the agent's output stays consistent.
@@ -48,6 +51,8 @@ MARKERS = {
                           "you generate in the browser and drop the file in inbox/."),
     ACCESS_API_PAID: ("TOP-UP NEEDED", "Requires buying credits separately. "
                                        "Verify current pricing before agreeing."),
+    ACCESS_HOST: ("HOST", "The agent's own environment renders this directly. "
+                          "Spends none of your platform credits."),
 }
 
 
@@ -198,6 +203,39 @@ def _read_block(lines: list[str], idx: int, min_indent: int) -> tuple[str, int]:
     return " ".join(p for p in out if p).strip(), idx
 
 
+def _join_wrapped_flow_lists(text: str) -> str:
+    """
+    Fold a flow list that spans lines onto one line.
+
+        models: [seedance-2, sora-2,
+                 kling, flux]
+
+    becomes `models: [seedance-2, sora-2, kling, flux]`. PyYAML handles the
+    wrapped form natively; the built-in fallback parser is line-based and would
+    otherwise keep only the first line — silently losing data, which is worse
+    than failing. Comment lines inside the list are dropped, matching YAML.
+    """
+    out: list[str] = []
+    buf: str | None = None
+    for line in text.splitlines():
+        if buf is None:
+            stripped = line.split("#", 1)[0].rstrip()
+            if "[" in stripped and stripped.count("[") > stripped.count("]"):
+                buf = stripped
+                continue
+            out.append(line)
+        else:
+            piece = line.split("#", 1)[0].strip()
+            if piece:
+                buf = f"{buf} {piece}"
+            if buf.count("[") <= buf.count("]"):
+                out.append(buf)
+                buf = None
+    if buf is not None:
+        out.append(buf)
+    return "\n".join(out)
+
+
 def load_yaml(path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
     try:
@@ -205,32 +243,94 @@ def load_yaml(path: Path) -> dict:
         data = yaml.safe_load(text)
         return data if isinstance(data, dict) else {}
     except ImportError:
-        return _tiny_yaml(text)
+        return _tiny_yaml(_join_wrapped_flow_lists(text))
 
 
 # ---------------------------------------------------------------------------
 # Config and state
 # ---------------------------------------------------------------------------
 
+SKILL_NAME = "ad-film-director"
+
+# Files that mark the skill's own folder, whatever the host called it.
+ROOT_MARKERS = ("SKILL.md", "fleet.example.yaml")
+
+
 def skill_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    """
+    The skill's folder, found by looking for its own marker files.
+
+    Do NOT assume `scripts/` nesting. Hosts install skills in different shapes:
+    some keep `<root>/scripts/fleet.py`, others flatten everything into one
+    directory. A hardcoded `parent.parent` silently resolves one level too high
+    in the flat layout and every config lookup then misses.
+
+    Walk up from this file instead, and fall back to the containing directory.
+    """
+    here = Path(__file__).resolve()
+    for candidate in (here.parent, *here.parents):
+        if any((candidate / m).is_file() for m in ROOT_MARKERS):
+            return candidate
+    return here.parent
+
+
+def user_config_dir() -> Path:
+    """
+    Where a personal fleet.yaml lives so it survives reinstalling the skill.
+
+    The personal config describes real accounts and balances, so it is
+    gitignored and deliberately not shipped with the skill. That means it cannot
+    live inside the skill folder, which a reinstall overwrites. Honour
+    XDG_CONFIG_HOME when set.
+    """
+    base = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(base) if base else Path.home() / ".config") / SKILL_NAME
 
 
 def find_config() -> tuple[Path | None, bool]:
-    """Return (path, is_example). Prefers a real fleet.yaml."""
+    """
+    Return (path, is_example). Prefers a real fleet.yaml over the example.
+
+    Search order, most specific first:
+      1. FLEET_CONFIG env var — explicit override, wins over everything
+      2. the current working directory — a per-project fleet
+      3. the skill folder — the classic location
+      4. ~/.config/<skill>/ — the durable personal location
+    """
+    override = os.environ.get("FLEET_CONFIG")
+    if override:
+        p = Path(override).expanduser()
+        if p.is_file():
+            return p, False
+
     root = skill_root()
     for name in ("fleet.yaml", "fleet.yml"):
-        for base in (Path.cwd(), root):
+        for base in (Path.cwd(), root, user_config_dir()):
             p = base / name
             if p.is_file():
                 return p, False
+
     ex = root / "fleet.example.yaml"
     return (ex, True) if ex.is_file() else (None, False)
 
 
 def state_path() -> Path:
-    cfg, _ = find_config()
-    return (cfg.parent if cfg else skill_root()) / ".fleet-state.json"
+    """
+    Where the spend log and rotation cursor live.
+
+    Next to the config, unless that would mean writing into the skill folder
+    beside the shipped example — a reinstall would wipe the spend history. In
+    that case keep state in the durable user config dir.
+    """
+    cfg, is_example = find_config()
+    if cfg and not is_example:
+        return cfg.parent / ".fleet-state.json"
+    d = user_config_dir()
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        return d / ".fleet-state.json"
+    except OSError:
+        return skill_root() / ".fleet-state.json"
 
 
 def load_state() -> dict:
@@ -282,6 +382,38 @@ class Platform:
         mw = raw.get("manual_workflow")
         self.manual_steps = _as_list(mw.get("steps")) if isinstance(mw, dict) else []
 
+        # -- protocol -------------------------------------------------------
+        # How to TALK to this platform, declared as data instead of hardcoded
+        # per platform id. A new service that speaks a shape we already know
+        # needs a config block and no code at all. When absent we fall back to
+        # the id, so every pre-existing fleet.yaml keeps working unchanged.
+        self.protocol = str(
+            raw.get("protocol") or api.get("protocol") or self.id
+        ).strip().lower()
+
+        # -- subscription ---------------------------------------------------
+        # Optional. Describes the PLAN behind the accounts: what it costs, how
+        # big the pool is, when it resets, and whether the balance can be read
+        # programmatically or was last typed in by hand. Every field optional;
+        # a platform with no subscription block behaves exactly as before.
+        sub = raw.get("subscription") if isinstance(raw.get("subscription"), dict) else {}
+        self.sub = sub
+        self.plan = str(sub.get("plan") or "")
+        self.seats = sub.get("seats")
+        self.cost_per_month_usd = sub.get("cost_per_month_usd")
+        self.credits_per_month = sub.get("credits_per_month")
+        # `resets` may live on the platform (legacy) or in the subscription block.
+        self.resets = str(sub.get("resets") or raw.get("resets") or "").strip().lower()
+        self.renews_on = str(sub.get("renews_on") or "")
+        self.verified_on = str(sub.get("verified_on") or "")
+        self.balance_source = str(
+            sub.get("balance_source") or ("api" if self.auth_env or self.auth_env_pattern
+                                          else "manual")
+        ).strip().lower()
+        # Models this platform can reach. Used to spot overlap with host tools
+        # so the agent never burns paid credits on something it renders free.
+        self.models = _as_list(raw.get("models"))
+
     # -- credentials -------------------------------------------------------
 
     def keys_present(self) -> list[str]:
@@ -303,6 +435,10 @@ class Platform:
         """
         if self.access == ACCESS_OFF:
             return ACCESS_OFF
+        if self.access == ACCESS_HOST:
+            # Host tools need no key of ours and no browser step. If the running
+            # host can't render, it says so at call time; nothing to verify here.
+            return ACCESS_HOST
         if self.access == ACCESS_API:
             return ACCESS_API if self.keys_present() else ACCESS_UI
         if self.access == ACCESS_API_PAID:
@@ -409,16 +545,21 @@ class Fleet:
 
     def mode(self) -> str:
         has_shell = bool(shutil.which("ffmpeg") or shutil.which("python3"))
-        can_api = any(p.effective_access() == ACCESS_API for p in self.platforms)
+        # Either a keyed API or a host renderer means footage can be produced
+        # without sending the user to a browser — both are AUTONOMOUS.
+        can_generate = any(
+            p.effective_access() in (ACCESS_API, ACCESS_HOST) for p in self.platforms
+        )
         if not has_shell:
             return "TEXT"
-        return "AUTONOMOUS" if can_api else "HYBRID"
+        return "AUTONOMOUS" if can_generate else "HYBRID"
 
     @property
     def prefer_fullest(self) -> bool:
         return bool(self.prefs.get("prefer_fullest_account", True))
 
-    def next_account(self, p: Platform, st: dict) -> int:
+    def next_account(self, p: Platform, st: dict,
+                     live: dict[int, float] | None = None) -> int:
         """
         Pick which account to use next.
 
@@ -428,14 +569,23 @@ class Fleet:
              is what you want when accounts hold one-off allocations.
           2. Round-robin — plain rotation when budgets are unknown or the user
              turned fullest-first off.
+
+        `live` maps account number to a balance read from the platform itself.
+        Pass it whenever you have one: the local ledger only knows spend logged
+        through this skill, so an account drawn down in the platform's own web UI
+        still looks untouched here. Trusting the ledger then sends work to an
+        account that is nearly empty while a full one sits idle — the exact
+        failure fullest-first exists to prevent. Live figures win when present.
         """
         if p.accounts <= 1:
             return 1
 
-        if self.prefer_fullest and p.budget_per_account not in (None, ""):
+        if self.prefer_fullest and (live or p.budget_per_account not in (None, "")):
             best, best_rem = 1, None
             for n in range(1, p.accounts + 1):
-                rem = p.remaining(st, n)
+                rem = (live or {}).get(n)
+                if rem is None:
+                    rem = p.remaining(st, n)
                 if rem is None:
                     continue
                 if best_rem is None or rem > best_rem:
@@ -492,11 +642,29 @@ def cmd_detect(fleet: Fleet, args) -> dict:
             "effective_access": eff,
             "marker": marker,
             "meaning": meaning,
+            "protocol": p.protocol,
             "accounts": p.accounts,
             "can": p.can,
             "best_for": p.best_for,
             "priority": p.priority,
         }
+        # Host platforms carry the tool map generate.py needs to name a renderer.
+        if eff == ACCESS_HOST and isinstance(p.raw.get("tools"), dict):
+            entry["tools"] = p.raw["tools"]
+        # Connection details generate.py needs to actually call the platform. It
+        # builds backends from THIS dict, so anything omitted here is invisible
+        # to it: without auth_env_pattern a numbered key is never found, and
+        # without endpoint every request goes nowhere. Names only — no secrets.
+        for field, value in (
+            ("endpoint", p.endpoint),
+            ("auth_env", p.auth_env),
+            ("auth_env_pattern", p.auth_env_pattern),
+            ("auth_scheme", p.raw.get("auth_scheme")),
+        ):
+            if value:
+                entry[field] = value
+        if isinstance(p.api, dict) and p.api:
+            entry["api"] = p.api
         if p.access == ACCESS_API and eff == ACCESS_UI:
             entry["downgraded_because"] = (
                 f"declared api but no key found in {p.auth_env or p.auth_env_pattern}"
@@ -633,6 +801,25 @@ def cmd_setup(fleet: Fleet, args) -> dict:
                         "If unsure, set `ui`; the skill still works fully.",
             },
             {
+                "ask": "For each tool — do the credits reset every month, and "
+                       "roughly how many are left right now?",
+                "why": "Fills the `subscription` block: resets, renews_on, "
+                       "credits_per_month, verified_on. Monthly credits usually "
+                       "do NOT roll over, so `inventory` can warn before a pool "
+                       "expires unused — that warning is only possible if the "
+                       "reset date is recorded.",
+                "map_to": {
+                    "resets monthly": "subscription.resets: monthly",
+                    "one-off allocation": "subscription.resets: never",
+                    "daily free credits": "subscription.resets: daily",
+                },
+                "note": "Set `verified_on` to today whenever the user quotes a "
+                        "balance from memory, and `balance_source: manual` when "
+                        "there's no API to read it from. A hand-typed figure is an "
+                        "estimate with an age, not a fact.",
+                "optional": True,
+            },
+            {
                 "ask": "Are you willing to buy extra credits anywhere, or should "
                        "I only ever use what you already have?",
                 "why": "Sets require_approval_for_paid and max_spend_per_run_usd. "
@@ -655,21 +842,38 @@ def cmd_setup(fleet: Fleet, args) -> dict:
         "then": [
             "Write fleet.yaml next to the skill (copy the structure from "
             "fleet.example.yaml, keeping only what applies).",
+            "Keep the `host` block if the environment you're running in has its own "
+            "generation tools, and list them under `tools`. Set `access: off` if it "
+            "doesn't — nothing else needs changing.",
             "Run `fleet.py detect` and show the user the resulting mode.",
+            "Run `fleet.py inventory` and read back what you recorded, including any "
+            "warnings. It is the user's chance to correct a wrong number before it "
+            "shapes a production.",
             "If any platform was set to `api`, run `fleet.py keys` and tell them "
             "exactly which environment variables to set.",
             "Never ask the user to paste an API key into the chat. Keys belong in "
             "their shell environment.",
         ],
+        "adding_a_platform_later": (
+            "No code changes, ever. Copy the blank template at the bottom of "
+            "fleet.example.yaml, fill in id/label/access, and it appears in every "
+            "command. For automatic generation the platform also needs a `protocol` "
+            "naming an API shape the scripts already speak (magica-like, fal-like, "
+            "heygen-like, host). Anything else is routed to the manual path, which "
+            "still works fully."
+        ),
         "schema_hint": {
             "platform_fields": {
                 "id": "short slug, e.g. magica",
                 "label": "human name",
-                "access": "api | ui | api-paid | off",
+                "access": "api | ui | api-paid | host | off",
+                "protocol": "magica-like | fal-like | heygen-like | host — the API "
+                            "SHAPE, not the vendor. Omitted means the id is tried.",
                 "accounts": "integer",
                 "budget_per_account": "number, optional",
                 "unit": "credits | flow-credits | etc.",
-                "resets": "monthly | never",
+                "models": "[model ids] — lets inventory flag overlap with host tools",
+                "tools": "{video, image, audio, avatar} — host platforms only",
                 "can": "[image, video, image-to-video, avatar-video, lipsync, tts]",
                 "best_for": "free-form strengths used for routing",
                 "weak_at": "free-form weaknesses; lowers routing score",
@@ -678,7 +882,175 @@ def cmd_setup(fleet: Fleet, args) -> dict:
                 "endpoint": "API base URL when access is api",
                 "url": "web UI URL when access is ui",
             },
+            "subscription_fields": {
+                "plan": "tariff name, free text",
+                "seats": "accounts on this plan",
+                "cost_per_month_usd": "number — totalled by inventory",
+                "credits_per_month": "pool size per period",
+                "resets": "monthly | daily | never",
+                "renews_on": "YYYY-MM-DD — drives use-it-or-lose-it warnings",
+                "verified_on": "YYYY-MM-DD — when the balance was last checked",
+                "balance_source": "manual | api — manual figures age and are "
+                                  "reported as estimates",
+            },
         },
+    }
+
+
+def _days_until(datestr: str) -> int | None:
+    """Whole days from today to an ISO date. Negative once it's in the past."""
+    if not datestr:
+        return None
+    try:
+        y, m, d = (int(x) for x in str(datestr).strip()[:10].split("-"))
+        return (datetime.date(y, m, d) - datetime.date.today()).days
+    except (ValueError, TypeError):
+        return None
+
+
+def cmd_inventory(fleet: Fleet, args) -> dict:
+    """
+    One answer to "what AI tooling do I actually own?".
+
+    Reads whatever the config declares — no platform is known to this function
+    by name. A user with a single free account gets one row; a user with six
+    platforms gets six. Warnings are the point: credits that expire unused, a
+    balance nobody has checked in weeks, and paid credits being spent on a model
+    the host renders for free are all money quietly leaking.
+    """
+    st = load_state()
+    stale_after = int(fleet.prefs.get("balance_stale_after_days", 7) or 7)
+    expiry_warn = int(fleet.prefs.get("expiry_warn_days", 7) or 7)
+
+    # Which models the host can render itself — used for the overlap warning.
+    host_models = {
+        m.lower()
+        for p in fleet.platforms
+        if p.effective_access() == ACCESS_HOST
+        for m in p.models
+    }
+
+    rows, warnings = [], []
+    monthly_cost = 0.0
+    total_accounts = 0
+
+    for p in fleet.platforms:
+        eff = p.effective_access()
+        if eff == ACCESS_OFF:
+            continue
+        marker, meaning = p.marker()
+        total_accounts += p.accounts
+        try:
+            monthly_cost += float(p.cost_per_month_usd or 0)
+        except (TypeError, ValueError):
+            pass
+
+        row: dict = {
+            "id": p.id,
+            "label": p.label,
+            "access": eff,
+            "marker": marker,
+            "meaning": meaning,
+            "accounts": p.accounts,
+            "can": p.can,
+            "protocol": p.protocol,
+        }
+        if p.models:
+            row["models"] = p.models
+        if p.plan:
+            row["plan"] = p.plan
+        if p.cost_per_month_usd is not None:
+            row["cost_per_month_usd"] = p.cost_per_month_usd
+        if p.resets:
+            row["resets"] = p.resets
+        row["balance_source"] = p.balance_source
+
+        # -- balance ---------------------------------------------------------
+        pool = p.total_remaining(st)
+        if pool is not None:
+            row["remaining_total"] = pool
+            row["unit"] = p.unit
+            declared = None
+            if p.budget_per_account not in (None, ""):
+                try:
+                    declared = float(p.budget_per_account) * p.accounts
+                except (TypeError, ValueError):
+                    declared = None
+            if declared:
+                row["pool_total"] = declared
+                pct = round(100.0 * pool / declared, 1)
+                row["remaining_pct"] = pct
+                if pct <= fleet.low_warn_pct:
+                    row["low"] = True
+                    warnings.append(
+                        f"{p.label}: only {pct}% of the pool left "
+                        f"({pool:g}/{declared:g} {p.unit})."
+                    )
+
+        # -- is the number trustworthy? --------------------------------------
+        if p.balance_source == "manual" and p.verified_on:
+            age = _days_until(p.verified_on)
+            if age is not None:
+                age = -age
+                row["balance_age_days"] = age
+                if age > stale_after:
+                    row["balance_stale"] = True
+                    warnings.append(
+                        f"{p.label}: balance last checked {age} days ago "
+                        f"({p.verified_on}) and can only be read by hand — "
+                        f"treat the figure as an estimate, not a fact."
+                    )
+        elif p.balance_source == "manual" and (p.credits_per_month or p.budget_per_account):
+            row["balance_stale"] = True
+            warnings.append(
+                f"{p.label}: balance is entered by hand and has no verified_on date — "
+                f"check it and record the date."
+            )
+
+        # -- use-it-or-lose-it ------------------------------------------------
+        if p.renews_on:
+            left = _days_until(p.renews_on)
+            if left is not None:
+                row["days_to_reset"] = left
+                if p.resets in ("monthly", "daily") and 0 <= left <= expiry_warn:
+                    row["expiring"] = True
+                    amount = f"{pool:g} {p.unit}" if pool is not None else "unused credits"
+                    warnings.append(
+                        f"{p.label}: {amount} expire in {left} day(s) on {p.renews_on} "
+                        f"and do NOT roll over — spend them or lose them."
+                    )
+                elif left < 0:
+                    warnings.append(
+                        f"{p.label}: renews_on {p.renews_on} is in the past — "
+                        f"update the config so reset warnings stay accurate."
+                    )
+
+        # -- paying for what you already have free ----------------------------
+        if eff in (ACCESS_UI, ACCESS_API, ACCESS_API_PAID) and p.models and host_models:
+            dupes = sorted({m for m in p.models if m.lower() in host_models})
+            if dupes:
+                row["also_on_host"] = dupes
+                warnings.append(
+                    f"{p.label}: {', '.join(dupes)} also render on the host for free — "
+                    f"route those shots to the host and save these credits for "
+                    f"models only {p.label} has."
+                )
+
+        rows.append(row)
+
+    rows.sort(key=lambda r: (r["access"] != ACCESS_HOST, r["id"]))
+    return {
+        "mode": fleet.mode(),
+        "config": str(fleet.path) if fleet.path else None,
+        "using_example_config": fleet.is_example,
+        "platforms_usable": len(rows),
+        "accounts_total": total_accounts,
+        "monthly_cost_usd": round(monthly_cost, 2) if monthly_cost else 0,
+        "inventory": rows,
+        "warnings": warnings,
+        "note": ("Host rows spend none of your platform credits. Manual rows need a "
+                 "browser step. Figures with balance_source=manual are only as fresh "
+                 "as verified_on."),
     }
 
 
@@ -882,18 +1254,42 @@ def cmd_spend(fleet: Fleet, args) -> dict:
     return out
 
 
+def _parse_live(spec: str | None) -> dict[int, float]:
+    """Parse `--live 1=38776717,2=22894621` into {account: balance}."""
+    out: dict[int, float] = {}
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        n, _, v = part.partition("=")
+        try:
+            out[int(n)] = float(v)
+        except ValueError:
+            continue
+    return out
+
+
 def cmd_accounts(fleet: Fleet, args) -> dict:
     st = load_state()
     p = next((x for x in fleet.platforms if x.id == args.platform), None)
     if not p:
         return {"error": f"unknown platform: {args.platform}"}
-    acct = fleet.next_account(p, st)
+    live = _parse_live(getattr(args, "live", None))
+    acct = fleet.next_account(p, st, live or None)
     save_state(st)
-    rem = p.remaining(st, acct)
+    rem = live.get(acct, p.remaining(st, acct))
     out = {"platform": p.id, "account": acct, "of": p.accounts}
     if rem is not None:
         out["remaining"] = rem
         out["unit"] = p.unit
+        out["balance_from"] = "live" if acct in live else "local ledger"
+    if not live and p.accounts > 1 and p.balance_source == "api":
+        out["warning"] = (
+            "Chosen from the local ledger, which only knows spend logged through "
+            "this skill — credits spent in the platform's own UI are invisible "
+            "here. Run `generate.py --balances " + p.id + "` and pass the result "
+            "as `--live 1=<bal>,2=<bal>` to route on real figures."
+        )
     if p.auth_env_pattern:
         out["auth_env"] = p.auth_env_pattern.replace("{n}", str(acct))
     elif p.auth_env:
@@ -917,6 +1313,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("setup", help="interview to build a fleet.yaml for a new user")
     sub.add_parser("keys", help="which API keys are present (values never shown)")
     sub.add_parser("budget", help="remaining credits per account")
+    sub.add_parser("inventory", help="what AI tooling you own: plans, pools, "
+                                     "expiry and host overlap")
 
     sp = sub.add_parser("plan", help="routing options per shot")
     sp.add_argument("--needs", required=True, help="path to plan.json")
@@ -934,6 +1332,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sp = sub.add_parser("accounts", help="next account in rotation")
     sp.add_argument("--platform", required=True)
+    sp.add_argument("--live", metavar="N=BAL,...",
+                    help="real balances from generate.py --balances, e.g. "
+                         "1=38776717,2=22894621 — overrides the local ledger")
 
     args = ap.parse_args(argv)
 
@@ -950,7 +1351,8 @@ def main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "detect": cmd_detect, "setup": cmd_setup, "keys": cmd_keys,
-        "budget": cmd_budget, "plan": cmd_plan, "pick": cmd_pick,
+        "budget": cmd_budget, "inventory": cmd_inventory,
+        "plan": cmd_plan, "pick": cmd_pick,
         "spend": cmd_spend, "accounts": cmd_accounts,
     }
     result = handlers[args.cmd](fleet, args)

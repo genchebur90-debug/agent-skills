@@ -36,6 +36,9 @@ from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+import planlint  # noqa: E402  — one spelling of the plan schema, one gate
 
 POLL_INTERVAL = 5
 POLL_TIMEOUT = 900  # 15 minutes
@@ -174,15 +177,32 @@ class MagicaBackend(Backend):
     """
     magica.ai — Bearer auth (gx_ keys), direct model execution via Nodes.
 
-    Verified against magica.com/docs 2026-07-26:
-        POST /api/v1/nodes/{modelId}/run   body: {subModelId?, input:{...}}
+    Verified against the live API 2026-08-01:
+        POST /api/v1/nodes/{nodeType}/run  body: {subModelId?, input:{...}}
         GET  /api/v1/nodes/runs/{runId}
         GET  /api/v1/credits/balance
-        POST /api/v1/nodes/estimate-credits
-        GET  /api/v1/models/{modelId}/schema
+        POST /api/v1/uploads              body: {base64|url|data_uri, filename, contentType}
+        GET  /api/v1/models               -> [{nodeType, name, category}]      <- PATH ids
+        GET  /api/v1/models/search        -> {modelCatalog: {category: [{modelId}]}}
+        GET  /api/v1/models/{modelId}/pricing   and   /schema
 
-    Note the shape: modelId goes in the PATH, and model parameters go inside a
-    nested `input` object — not at the body root.
+    TWO ID NAMESPACES, and mixing them is the most common failure:
+      * the PATH takes a **nodeType** — underscores, e.g. `seedance_2_0_fast`,
+        `kling_v3_pro`. Get these from GET /models.
+      * `subModelId` in the body takes the **catalog modelId** — dashes, e.g.
+        `seedance-2.0-fast-image-to-video`. Get these from GET /models/search.
+      Putting the dashed catalog id in the path returns
+      404 {"error":"Unknown node type: ..."} for every shot.
+
+    Image inputs must be on a host the provider can fetch. Thread-internal URLs are
+    not reachable — POST the bytes to /uploads as base64 and use the CDN url it
+    returns.
+
+    POST /nodes/estimate-credits IS BROKEN: it answers 200 with {"microcredits": 0}
+    for paid models. Zero does not mean free. Price from
+    GET /models/{modelId}/pricing -> pricingDetails.tiers, multiplied by seconds.
+
+    Model parameters go inside a nested `input` object, not at the body root.
     """
 
     def auth_headers(self) -> dict:
@@ -202,7 +222,13 @@ class MagicaBackend(Backend):
     # -- cost and balance, used by the Routing Gate --------------------------
 
     def balance(self) -> dict | None:
-        """Live credit balance for this account. None if unreachable."""
+        """
+        Live credit balance for this account. None if unreachable.
+
+        Reports WHY on failure. "Did not respond" sends someone hunting a network
+        fault when the real answer is usually a rejected key — and those need
+        opposite fixes.
+        """
         code, payload = http(f"{self.endpoint}/credits/balance",
                              headers=self.auth_headers(), timeout=30)
         if code == 200 and isinstance(payload, dict):
@@ -211,7 +237,22 @@ class MagicaBackend(Backend):
                 "formatted": payload.get("formatted"),
                 "subscription": payload.get("hasActiveSubscription"),
             }
-        return None
+        if code in (401, 403):
+            return {
+                "available": None,
+                "auth_failed": True,
+                "http_status": code,
+                "why": (f"{self.label} rejected the key for account {self.account} "
+                        f"(HTTP {code}). Check it is current and pasted whole."),
+            }
+        if code == 429:
+            return {"available": None, "http_status": 429,
+                    "why": "Rate limited — wait and retry."}
+        return {
+            "available": None,
+            "http_status": code,
+            "why": f"Balance call returned HTTP {code}.",
+        }
 
     def estimate(self, shots: list[dict]) -> dict | None:
         """
@@ -264,9 +305,9 @@ class MagicaBackend(Backend):
         model = shot.get("model")
         if not model:
             return False, (
-                "magica needs a model id in the shot, e.g. \"model\": \"veo_3_1\". "
-                "Discover ids with: curl -H \"Authorization: Bearer $MAGICA_API_KEY_1\" "
-                "https://api.magica.com/api/v1/models/search?q=video"
+                "magica needs a nodeType in the shot, e.g. \"model\": \"kling_v3_pro\" "
+                "(underscores). List them with GET /api/v1/models. The dashed catalog id "
+                "such as kling-v3-pro-image-to-video goes in \"sub_model\", not here."
             )
         body: dict = {"input": self._input_for(shot)}
         if shot.get("sub_model"):
@@ -287,8 +328,9 @@ class MagicaBackend(Backend):
         if code == 429:
             return False, "rate limited (429) — wait and retry, or use another account"
         if code == 404:
-            return False, (f"model {model!r} not found. Check the id with "
-                           "GET /v1/models/search")
+            return False, (f"nodeType {model!r} not found. The PATH needs an underscored "
+                           "nodeType from GET /v1/models (e.g. kling_v3_pro). A dashed "
+                           "catalog id from /models/search belongs in sub_model instead.")
         return False, f"{code}: {str(payload)[:250]}"
 
     def poll(self, handle: Any) -> tuple[str, Any]:
@@ -407,11 +449,146 @@ class HeyGenBackend(Backend):
         return "pending", status or "processing"
 
 
-BACKENDS = {"magica": MagicaBackend, "fal": FalBackend, "heygen": HeyGenBackend}
+class HostBackend(Backend):
+    """
+    The agent's own host renders the shot — no HTTP, no key, no browser step.
+
+    Everything else here talks to a remote service. This one cannot: the host's
+    generation tools live in the agent's runtime, not behind a URL this script
+    can reach. So it does the one useful thing a script can do in that position
+    — it turns each shot into an unambiguous, ready-to-execute render order and
+    hands it back. The agent executes the orders with its own tools and writes
+    the results to the filenames named here.
+
+    The filename contract is the same one packet.py uses (`inbox/<shot>.mp4`),
+    so assembly downstream cannot tell how a clip arrived. That is the point:
+    swapping a shot between host, API and manual generation changes nothing
+    after this step.
+
+    Config is data, like every other platform:
+
+        - id: host
+          access: host
+          protocol: host
+          tools:
+            video:  GenerateVideo
+            image:  GenerateImage
+            audio:  GenerateAudio
+            avatar: GenerateAvatarVideo
+    """
+
+    # Which shot needs map to which kind of tool, in priority order.
+    NEED_KINDS = (
+        ("avatar", ("avatar", "lipsync", "talking-head", "presenter")),
+        ("audio", ("audio", "tts", "voice", "voiceover", "music")),
+        ("image", ("image", "still", "keyframe", "frame", "poster")),
+        ("video", ("video", "clip", "shot", "image-to-video", "motion")),
+    )
+
+    def _kind(self, shot: dict) -> str:
+        want = " ".join(
+            str(shot.get(k) or "") for k in ("kind", "need", "type", "output")
+        ).lower()
+        for kind, words in self.NEED_KINDS:
+            if any(w in want for w in words):
+                return kind
+        # No explicit need: an attached still implies image-to-video, otherwise
+        # a plain video clip. Both are video work.
+        return "video"
+
+    def _tool_for(self, kind: str) -> str:
+        tools = self.plat.get("tools")
+        if isinstance(tools, dict) and tools.get(kind):
+            return str(tools[kind])
+        return {
+            "video": "GenerateVideo",
+            "image": "GenerateImage",
+            "audio": "GenerateAudio",
+            "avatar": "GenerateAvatarVideo",
+        }[kind]
+
+    def auth_headers(self) -> dict:
+        return {}
+
+    def submit(self, shot: dict) -> tuple[bool, Any]:
+        kind = self._kind(shot)
+        sid = str(shot.get("id") or "shot")
+        ext = {"audio": "mp3", "image": "png"}.get(kind, "mp4")
+        filename = str(shot.get("filename") or f"{sid}.{ext}")
+
+        args: dict = {"prompt": shot.get("prompt", "")}
+        if shot.get("seconds"):
+            args["durationSeconds"] = shot["seconds"]
+        if shot.get("aspect"):
+            args["aspectRatio"] = shot["aspect"]
+        if shot.get("resolution"):
+            args["resolution"] = shot["resolution"]
+        if shot.get("model"):
+            args["model"] = shot["model"]
+        # Consistency controls: a still locks composition, references hold the
+        # character and style steady across a campaign. See consistency.md.
+        # One spelling of "the plates this shot inherits". packet.py, planlint
+        # and generate.py used to disagree about the field name, which is how a
+        # reference silently stopped being attached between two scripts.
+        parents = planlint.normalize_shot(shot).get("parents", [])
+        if parents:
+            args["firstFrameImage"] = parents[0]
+            args["referenceImages"] = parents[:9]
+        if shot.get("voice"):
+            args["voice"] = shot["voice"]
+        if shot.get("avatar_id"):
+            args["avatarId"] = shot["avatar_id"]
+        extra = shot.get("input")
+        if isinstance(extra, dict):
+            args.update(extra)
+        args["title"] = str(shot.get("title") or shot.get("label") or sid)
+
+        return True, {
+            "render_order": True,
+            "shot": sid,
+            "kind": kind,
+            "tool": self._tool_for(kind),
+            "args": args,
+            "save_as": f"inbox/{filename}",
+        }
+
+    def poll(self, handle: Any) -> tuple[str, Any]:
+        # Nothing to wait for: the agent, not this script, does the rendering.
+        return "host", handle
+
+
+# Protocol -> backend. Keyed by the *shape of the conversation*, not by vendor,
+# so a new service that speaks a shape already here is a config block and zero
+# code. Platform ids stay as aliases so existing fleet.yaml files keep working.
+PROTOCOLS = {
+    "magica-like": MagicaBackend,
+    "fal-like": FalBackend,
+    "heygen-like": HeyGenBackend,
+    "host": HostBackend,
+}
+
+# Legacy: id-keyed lookup from before protocols existed.
+BACKENDS = {"magica": MagicaBackend, "fal": FalBackend, "heygen": HeyGenBackend,
+            "host": HostBackend}
+
+
+def resolve_backend_class(plat: dict):
+    """
+    Find the backend for a platform: declared protocol first, then its id as a
+    legacy alias. Returns None when nothing can talk to it, which callers report
+    as "generate this one manually" rather than failing the run.
+    """
+    proto = str(plat.get("protocol") or "").strip().lower()
+    if proto in PROTOCOLS:
+        return PROTOCOLS[proto]
+    # Tolerate a bare protocol name ("magica" for "magica-like").
+    if proto and f"{proto}-like" in PROTOCOLS:
+        return PROTOCOLS[f"{proto}-like"]
+    return BACKENDS.get(str(plat.get("id") or "").strip().lower())
 
 
 def make_backend(plat: dict, account: int) -> Backend | None:
-    cls = BACKENDS.get(plat.get("id", ""))
+    cls = resolve_backend_class(plat)
     return cls(plat, account) if cls else None
 
 
@@ -445,14 +622,16 @@ def build_jobs(plan: dict, detect: dict, only: str | None) -> tuple[list[dict], 
                             "reason": f"{p.get('label', pid)} is UI-only — "
                                       "use packet.py and generate manually"})
             continue
-        if pid not in BACKENDS:
+        if resolve_backend_class(p) is None:
+            proto = p.get("protocol") or pid
             skipped.append({"shot": sid, "platform": pid,
-                            "reason": f"no API backend implemented for {pid!r} — "
-                                      "generate manually via packet.py"})
+                            "reason": f"no backend speaks protocol {proto!r} for "
+                                      f"{pid!r} — generate manually via packet.py"})
             continue
         jobs.append({
             "shot": shot, "id": sid, "platform": p, "pid": pid,
             "paid": access == "api-paid",
+            "host": access == "host",
             "account": shot.get("account") or 1,
             "cost_note": p.get("cost_warning", ""),
         })
@@ -520,6 +699,10 @@ def all_account_balances(detect: dict, platform_id: str) -> list[dict]:
                 bal = be.balance()  # type: ignore[attr-defined]
                 if bal:
                     row.update(bal)
+                    # A reachable endpoint that returned no number is still a
+                    # failure for the caller — surface it as one.
+                    if bal.get("available") is None and bal.get("why"):
+                        row["error"] = bal["why"]
                 else:
                     row["error"] = "balance endpoint did not respond"
             except Exception as e:
@@ -589,6 +772,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="report which platforms are API-callable right now")
     ap.add_argument("--balances", metavar="PLATFORM",
                     help="show live credit balance for every account on a platform")
+    ap.add_argument("--campaign", help="campaign name for lock checks (default: active)")
+    ap.add_argument("--force", action="store_true",
+                    help="generate despite planlint errors. This spends money on "
+                         "footage already known to drift.")
     args = ap.parse_args(argv)
 
     detect = fleet_json("detect")
@@ -602,8 +789,10 @@ def main(argv: list[str] | None = None) -> int:
             rows.append({
                 "id": p["id"], "label": p["label"],
                 "access": p.get("effective_access"), "marker": p.get("marker"),
-                "backend_implemented": p["id"] in BACKENDS,
-                "callable_now": p.get("effective_access") == "api" and p["id"] in BACKENDS,
+                "protocol": p.get("protocol") or p["id"],
+                "backend_implemented": resolve_backend_class(p) is not None,
+                "callable_now": (p.get("effective_access") in ("api", "host")
+                                 and resolve_backend_class(p) is not None),
                 "cost_warning": p.get("cost_warning", ""),
             })
         print(json.dumps({"mode": detect.get("mode"), "platforms": rows}, indent=2))
@@ -642,6 +831,26 @@ def main(argv: list[str] | None = None) -> int:
     except json.JSONDecodeError as e:
         print(json.dumps({"error": f"invalid JSON: {e}"}, indent=2))
         return 1
+
+    # ---- the gate --------------------------------------------------------
+    # Money is about to move. A shot that names no plate will come back wrong
+    # and be regenerated at full price, so the cheapest possible moment to
+    # catch it is here, before the first API call.
+    lint_report = planlint.lint(plan, planlint.load_campaign(args.campaign))
+    if not lint_report["ok"]:
+        print(planlint.render(lint_report), file=sys.stderr)
+        if not args.force:
+            print(json.dumps({
+                "blocked": "plan has errors that guarantee drift — not spending "
+                           "credits on it",
+                "errors": len(lint_report["errors"]),
+                "fix_then_rerun": f"python3 scripts/planlint.py --plan {args.plan}",
+                "override": "--force, only with the user's explicit approval",
+            }, indent=2))
+            return 1
+        print("proceeding under --force despite the errors above\n", file=sys.stderr)
+    elif lint_report["warnings"]:
+        print(planlint.render(lint_report), file=sys.stderr)
 
     jobs, skipped = build_jobs(plan, detect, args.shot)
     paid_jobs = [j for j in jobs if j["paid"]]
